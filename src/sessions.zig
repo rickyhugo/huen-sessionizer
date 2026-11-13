@@ -32,7 +32,7 @@ pub fn discover(io: Io, a: A, env: *const Env, cfg: *const config.Config) anyerr
     var list: std.ArrayList(Session) = .empty;
     for (found) |ref| {
         const name = std.fs.path.basename(ref.path);
-        if (cfg.list_worktrees == true and (try repos.resolve(io, a, ref)).bare) {
+        if (cfg.list_worktrees == true and try repos.isBare(io, a, env, ref)) {
             for (try repos.worktrees(io, a, ref, .registered)) |tree| {
                 const tree_ref = (repos.detect(io, tree.path, providers) catch null) orelse continue;
                 try list.append(a, entryFor(tree_ref, try std.fmt.allocPrint(a, "{s}#{s}", .{ name, tree.name })));

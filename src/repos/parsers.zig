@@ -2,6 +2,124 @@ const std = @import("std");
 const A = std.mem.Allocator;
 const Worktree = @import("../repos.zig").Worktree;
 
+/// Read the common local file, as `git config --file` does without includes.
+/// Unusual syntax goes back to Git rather than guessing during discovery.
+pub fn configBare(bytes: []const u8) error{UnsupportedGitConfig}!?bool {
+    var result: ?bool = null;
+    var core = false;
+    var section_seen = false;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |raw| {
+        var quoted = false;
+        var end = raw.len;
+        var position: usize = 0;
+        while (position < raw.len) : (position += 1) {
+            switch (raw[position]) {
+                0 => return error.UnsupportedGitConfig,
+                '\\' => {
+                    position += 1;
+                    if (position == raw.len or std.mem.indexOfScalar(u8, "\\\"ntb", raw[position]) == null)
+                        return error.UnsupportedGitConfig;
+                },
+                '"' => quoted = !quoted,
+                '#', ';' => if (!quoted) {
+                    end = position;
+                    break;
+                },
+                else => {},
+            }
+        }
+        if (quoted) return error.UnsupportedGitConfig;
+        const text = std.mem.trim(u8, raw[0..end], " \t\r");
+        if (text.len == 0) continue;
+        if (text[0] == '[') {
+            if (text[text.len - 1] != ']') return error.UnsupportedGitConfig;
+            const section = std.mem.trim(u8, text[1 .. text.len - 1], " \t");
+            const split = std.mem.indexOfAny(u8, section, " \t") orelse section.len;
+            if (split == 0) return error.UnsupportedGitConfig;
+            for (section[0..split]) |c| {
+                if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.') return error.UnsupportedGitConfig;
+            }
+            const subsection = std.mem.trim(u8, section[split..], " \t");
+            if (subsection.len > 0) {
+                if (subsection.len < 2 or subsection[0] != '"' or subsection[subsection.len - 1] != '"' or
+                    std.mem.indexOfScalar(u8, subsection[1 .. subsection.len - 1], '"') != null)
+                    return error.UnsupportedGitConfig;
+            }
+            core = std.ascii.eqlIgnoreCase(section, "core");
+            section_seen = true;
+            continue;
+        }
+        if (!section_seen) return error.UnsupportedGitConfig;
+        const equal = std.mem.indexOfScalar(u8, text, '=');
+        const key = std.mem.trim(u8, text[0 .. equal orelse text.len], " \t");
+        if (key.len == 0 or !std.ascii.isAlphabetic(key[0])) return error.UnsupportedGitConfig;
+        for (key) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '-') return error.UnsupportedGitConfig;
+        }
+        if (!core or !std.ascii.eqlIgnoreCase(key, "bare")) continue;
+        if (equal) |i| {
+            var value = std.mem.trim(u8, text[i + 1 ..], " \t");
+            if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
+            if (value.len == 0 or std.ascii.eqlIgnoreCase(value, "false") or
+                std.ascii.eqlIgnoreCase(value, "no") or std.ascii.eqlIgnoreCase(value, "off"))
+            {
+                result = false;
+            } else if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "yes") or std.ascii.eqlIgnoreCase(value, "on")) {
+                result = true;
+            } else {
+                const digits = if (value[0] == '+' or value[0] == '-') value[1..] else value;
+                if (digits.len > 1 and digits[0] == '0') return error.UnsupportedGitConfig;
+                for (digits) |c| {
+                    if (!std.ascii.isDigit(c)) return error.UnsupportedGitConfig;
+                }
+                const number = std.fmt.parseInt(i32, value, 10) catch return error.UnsupportedGitConfig;
+                result = number != 0;
+            }
+        } else {
+            result = true;
+        }
+    }
+    return result;
+}
+
+test "bare config handles Git booleans comments duplicate keys and unrelated quoted commands" {
+    try std.testing.expectEqual(@as(?bool, false), try configBare(
+        "[core]\r\nbare = true\r\n[Core]\r\nBaRe = \"OFF\" # last value wins\r\n" ++
+            "[hook \"pre-commit\"]\ncommand = \"echo \\\"#not a comment\\\"; printf '\\\\n'\"\n",
+    ));
+    for ([_][]const u8{ "true", "YES", "\"on\"", "1", "-2" }) |value| {
+        var buffer: [128]u8 = undefined;
+        try std.testing.expectEqual(@as(?bool, true), try configBare(try std.fmt.bufPrint(&buffer, "[core]\nbare = {s}\n", .{value})));
+    }
+    for ([_][]const u8{ "false", "No", "\"off\"", "0", "", "\"\"" }) |value| {
+        var buffer: [128]u8 = undefined;
+        try std.testing.expectEqual(@as(?bool, false), try configBare(try std.fmt.bufPrint(&buffer, "[core]\nbare = {s}\n", .{value})));
+    }
+    try std.testing.expectEqual(@as(?bool, true), try configBare("[core]\nbare ; implicit true\n"));
+    try std.testing.expectEqual(@as(?bool, null), try configBare("[core \"other\"]\nbare=true\n[core.other]\nbare=true\n"));
+    try std.testing.expectEqual(@as(?bool, false), try configBare("[core]\nbare=false\n[include]\npath=other-config\n"));
+}
+
+test "bare config delegates complex values and malformed syntax to Git" {
+    for ([_][]const u8{
+        "[core]\nbare=tr\\\nue\n",
+        "[core]\nbare=t\"ru\"e\n",
+        "[core]\nbare=1k\n",
+        "[core]\nbare=1_0\n",
+        "[core]\nbare=08\n",
+        "[core]\nbare=unknown\n",
+        "[core]\nbare=true\n[hook \"test\"]\ncommand=\"unclosed\n",
+        "[core]\nbare=true\n[hook \"test\"]\ncommand=bad\\escape\n",
+        "bare=true\n",
+        "[core\nbare=true\n",
+        "[core]\nbare=true\ninvalid key=value\n",
+        "[core]\nbare=true\x00\n",
+    }) |text| {
+        try std.testing.expectError(error.UnsupportedGitConfig, configBare(text));
+    }
+}
+
 pub fn boolean(text: []const u8) !bool {
     if (std.mem.eql(u8, text, "true")) return true;
     if (std.mem.eql(u8, text, "false")) return false;

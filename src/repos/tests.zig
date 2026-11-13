@@ -117,7 +117,10 @@ const Fixture = struct {
     }
 
     fn run(self: *Fixture, cwd: []const u8, argv: []const []const u8) !void {
-        const output = try process.capture(io, self.a(), .{ .argv = argv, .cwd = cwd, .stdin = .ignore });
+        var env = try std.testing.environ.createMap(self.a());
+        // The commit hook's index belongs to the checkout, not these fixtures.
+        _ = env.swapRemove("GIT_INDEX_FILE");
+        const output = try process.capture(io, self.a(), .{ .argv = argv, .cwd = cwd, .env = &env, .stdin = .ignore });
         if (output.term != .exited or output.term.exited != 0) {
             std.debug.print("Fixture command failed {s}\n{s}\n", .{ argv[0], output.stderr });
             return error.FixtureCommandFailed;
@@ -267,6 +270,8 @@ test "real git linked checkouts are discovered separately and names use administ
     const ref = (try repos.detect(io, linked, &.{.git})).?;
     const opened = try repos.resolve(io, f.a(), ref);
     try std.testing.expect(opened.linked and !opened.bare);
+    var env = std.process.Environ.Map.init(f.a());
+    try std.testing.expect(!try repos.isBare(io, f.a(), &env, ref));
     try std.testing.expectEqualStrings(linked, opened.cwd);
     const trees = try repos.worktrees(io, f.a(), main, .registered);
     try std.testing.expectEqual(@as(usize, 1), trees.len);
@@ -291,6 +296,8 @@ test "real git bare worktrees support relative metadata paths prunable records a
     const ref: repos.RepoRef = .{ .path = bare, .provider = .git };
     const opened = try repos.resolve(io, f.a(), ref);
     try std.testing.expect(opened.bare and !opened.linked);
+    var env = std.process.Environ.Map.init(f.a());
+    try std.testing.expect(try repos.isBare(io, f.a(), &env, ref));
     try std.testing.expectEqualStrings(bare, opened.cwd);
     try f.git(bare, &.{ "config", "worktree.useRelativePaths", "true" });
     const one = try f.path("one/checkout");
@@ -306,6 +313,7 @@ test "real git bare worktrees support relative metadata paths prunable records a
     try f.git(one, &.{ "config", "--worktree", "core.bare", "false" });
     const private_override = try repos.resolve(io, f.a(), .{ .path = one, .provider = .git });
     try std.testing.expect(private_override.linked and private_override.bare);
+    try std.testing.expect(try repos.isBare(io, f.a(), &env, .{ .path = one, .provider = .git }));
     try std.testing.expectEqualStrings(one, private_override.cwd);
     const trees = try repos.worktrees(io, f.a(), ref, .registered);
     try std.testing.expectEqual(@as(usize, 2), trees.len);
@@ -335,7 +343,40 @@ test "real git dotgit pointer to dotbare remains bare not linked" {
         const ref = (try repos.detect(io, try f.path("project"), &.{.git})).?;
         const opened = try repos.resolve(io, f.a(), ref);
         try std.testing.expect(opened.bare and !opened.linked);
+        var env = std.process.Environ.Map.init(f.a());
+        try std.testing.expect(try repos.isBare(io, f.a(), &env, ref));
         try std.testing.expectEqualStrings(bare, opened.cwd);
+    }
+}
+
+test "bare discovery agrees with Git including complex config fallback" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const ref = try f.repo("main");
+    var env = std.process.Environ.Map.init(f.a());
+    for ([_][]const u8{
+        "[core]\nbare=false\n",
+        "[Core]\nBaRe=YES\n",
+        "[core]\nbare\n",
+        "[core]\nbare=\n",
+        "[core]\nbare=-1\n",
+        "[core]\nbare=1k\n",
+        "[core]\nbare=1_0\n",
+        "[core]\nbare=08\n",
+        "[core]\nbare=t\"ru\"e\n",
+        "[core]\nbare=tr\\\nue\n",
+        "[core]\nbare=false\n[core \"other\"]\nbare=true\n",
+        "[core]\nbare=false\n[include]\npath=included\n",
+        "[core]\nbare=false\n[hook \"test\"]\ncommand=\"echo \\\"quoted\\\"\"\n",
+        "[core]\nrepositoryformatversion=0\n",
+    }) |contents| {
+        try f.tmp.dir.writeFile(io, .{ .sub_path = "main/.git/config", .data = contents });
+        try f.tmp.dir.writeFile(io, .{ .sub_path = "main/.git/included", .data = "[core]\nbare=true\n" });
+        if (repos.resolve(io, f.a(), ref)) |resolved| {
+            try std.testing.expectEqual(resolved.bare, try repos.isBare(io, f.a(), &env, ref));
+        } else |err| {
+            try std.testing.expectError(err, repos.isBare(io, f.a(), &env, ref));
+        }
     }
 }
 

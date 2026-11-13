@@ -5,6 +5,37 @@ const tmux = @import("tmux");
 const fake = @import("process");
 const client: tmux.Client = .{ .socket = "tms-session-fixture", .inside_tmux = true };
 
+test "listing ordinary and linked checkouts does not spawn Git with worktrees enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    try directory.dir.createDirPath(io, "main/.git/objects");
+    try directory.dir.createDirPath(io, "main/.git/refs");
+    try directory.dir.createDirPath(io, "main/.git/worktrees/topic");
+    try directory.dir.createDirPath(io, "topic");
+    try directory.dir.writeFile(io, .{ .sub_path = "main/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "main/.git/config", .data = "[core]\nrepositoryformatversion = 0\nbare = false\n[remote \"origin\"]\nurl = https://example.com/repo.git\n[hook \"pre-commit\"]\ncommand = \"test \\\"${HK:-1}\\\" = 0 || mise x -- hk run pre-commit\"\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "topic/.git", .data = "gitdir: ../main/.git/worktrees/topic\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/topic/HEAD", .data = "ref: refs/heads/topic\n" });
+    try directory.dir.writeFile(io, .{ .sub_path = "main/.git/worktrees/topic/commondir", .data = "../..\n" });
+    const root = try directory.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    const cfg: config.Config = .{
+        .search_dirs = &.{.{ .path = root, .depth = 1 }},
+        .list_worktrees = true,
+    };
+    fake.reset(a, &.{});
+    const result = sessions.discover(io, a, &env, &cfg);
+    try std.testing.expectEqual(@as(usize, 0), fake.calls.items.len);
+    const catalog = try result;
+    try std.testing.expectEqual(@as(usize, 2), catalog.entries.len);
+    try std.testing.expectEqualStrings("main", catalog.entries[0].key);
+    try std.testing.expectEqualStrings("topic", catalog.entries[1].key);
+}
+
 fn expectArgs(index: usize, args: []const []const u8) !void {
     const request = fake.calls.items[index].request;
     try std.testing.expectEqual(args.len + 3, request.argv.len);

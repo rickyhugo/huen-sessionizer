@@ -175,6 +175,38 @@ pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
     }
 }
 
+pub fn isBare(io: Io, a: A, env: *const std.process.Environ.Map, ref: RepoRef) anyerror!bool {
+    if (ref.provider == .git and env.get("GIT_COMMON_DIR") == null and env.get("GIT_OBJECT_DIRECTORY") == null) {
+        return gitBare(io, a, ref) catch |err| switch (err) {
+            error.OutOfMemory, error.Canceled => return err,
+            else => (try resolve(io, a, ref)).bare,
+        };
+    }
+    return (try resolve(io, a, ref)).bare;
+}
+
+fn gitBare(io: Io, a: A, ref: RepoRef) !bool {
+    const metadata = if (ref.git_metadata) |hint| hint else try gitMetadata(io, a, ref.path);
+    const pointer = try std.fs.path.join(a, &.{ metadata, "commondir" });
+    const bytes = Io.Dir.cwd().readFileAlloc(io, pointer, a, .limited(4096)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    const common = if (bytes) |value|
+        try std.fs.path.resolve(a, &.{ metadata, std.mem.trimEnd(u8, value, "\r\n") })
+    else
+        metadata;
+    for ([_][]const u8{ "objects", "refs" }) |part| {
+        const path = try std.fs.path.join(a, &.{ common, part });
+        var dir = try Io.Dir.cwd().openDir(io, path, .{});
+        dir.close(io);
+    }
+    if (!isFile(io, try std.fs.path.join(a, &.{ metadata, "HEAD" }))) return error.GitError;
+    const path = try std.fs.path.join(a, &.{ common, "config" });
+    const contents = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1024 * 1024));
+    return (try parsers.configBare(contents)) orelse !exists(io, try std.fs.path.join(a, &.{ ref.path, ".git" }));
+}
+
 pub fn worktrees(io: Io, a: A, ref: RepoRef, set: WorkspaceSet) anyerror![]const Worktree {
     if (ref.provider == .jujutsu and set == .registered) {
         // Preserve the captured linked-workspace NotDir failure.

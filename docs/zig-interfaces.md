@@ -131,6 +131,7 @@ These signatures belong to `src/repos.zig`:
 pub fn discover(io: Io, a: A, search: Search) anyerror![]const RepoRef;
 pub fn detect(io: Io, path: []const u8, providers: []const Provider) anyerror!?RepoRef;
 pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved;
+pub fn isBare(io: Io, a: A, env: *const Env, ref: RepoRef) anyerror!bool;
 pub fn worktrees(io: Io, a: A, ref: RepoRef, set: WorkspaceSet) anyerror![]const Worktree;
 pub fn submodules(io: Io, a: A, ref: RepoRef, recursive: bool) anyerror![]const Submodule;
 pub fn cloneRepo(io: Io, a: A, remote: []const u8, target: []const u8) anyerror!void;
@@ -140,6 +141,11 @@ pub fn initRepo(io: Io, a: A, target: []const u8, env: *const Env) anyerror!void
 `Search` carries validated roots, optional literal substring exclusions, and ordered providers. `excluded = null` skips exclusion-related path validation. A present list, including an empty list, requires every queued path to be UTF-8. Callers preserve configuration presence instead of replacing null with an empty list.
 
 Detection is shallow. Resolution is lazy and cannot fall back to another provider. `Resolved` carries cwd, metadata path, bare status, and linked status. Submodule enumeration uses the known parent registration when checkout metadata is absent. Returned references preserve metadata ownership even when an unrelated repository lies between the parent and the deleted checkout.
+
+Catalog discovery uses `isBare` instead of full resolution. For ordinary Git
+configuration it reads metadata pointers and the common config directly, with
+no subprocesses. Complex syntax and repository environment overrides fall back
+to full resolution. Linked checkouts use the common `core.bare` setting.
 
 `WorkspaceSet.active_other` serves refresh and excludes the current jj workspace. `registered` serves generated catalog entries and includes workspace-store records. Git worktree names use administrative IDs. `Submodule.name` retains the provider's name for session naming. `cloneRepo` creates the target directory, inherits output, waits, and preserves the baseline's ignored nonzero exit. Other spawn failures remain errors.
 
