@@ -1,0 +1,114 @@
+[tools]
+zig = "0.17.1"
+hk = "2.12.0"
+jj = "0.38.0"
+tmux = "3.8"
+python = "3.14.7"
+gh = "2.103.3"
+
+[tasks.build]
+description = "Build the Zig executable"
+run = "zig build"
+
+[tasks."build:release"]
+description = "Build zig-out/bin/tms with ReleaseFast"
+run = "zig build -Doptimize=ReleaseFast"
+
+[tasks.test]
+description = "Run Zig tests"
+run = "zig build test"
+
+[tasks."test:adapters"]
+description = "Verify tmux arguments, command policies, and a private tmux lifecycle"
+run = "python3 src/app/check.py --real-tmux"
+
+[tasks."test:harness"]
+description = "Check compatibility test isolation"
+run = [
+  "python3 -m unittest discover -s tests/compat -p 'test_*.py'",
+  "python3 -m unittest discover -s tests/terminal -p 'test_*.py'",
+  "python3 -m unittest discover -s tests/packaging -p 'test_*.py'",
+]
+
+[tasks."test:compat"]
+description = "Compare Zig commands and ranking with the Rust fixtures"
+depends = ["test:harness", "build:release"]
+run = [
+  "python3 scripts/compat.py --jj --bin zig-out/bin/tms --oracle zig-out/bin/tms-oracle",
+  "python3 src/cli/error_check.py --bin zig-out/bin/tms",
+  "python3 src/app/review_check.py --binary zig-out/bin/tms",
+]
+
+[tasks."test:terminal"]
+description = "Exercise the Zig picker in isolated tmux terminals"
+depends = ["build"]
+run = "python3 scripts/compat_terminal.py --bin zig-out/bin/tms"
+
+[tasks."test:terminal:strict"]
+description = "Verify Zig PTY and popup behavior with Unicode and cleanup fixes"
+depends = ["test:harness", "build:release"]
+run = "python3 scripts/terminal_checks.py --binary zig-out/bin/tms --require-improvements --output .audit/terminal"
+
+[tasks."test:picker:regressions"]
+description = "Verify cancellation under blocked output and fragmented input"
+run = "python3 src/picker/regression-pty.py"
+
+[tasks.fmt]
+description = "Format Zig files through hk"
+run = "hk fix --all --step zig-fmt"
+
+[tasks."fmt:check"]
+description = "Check Zig formatting through hk"
+run = "hk check --all --step zig-fmt"
+
+[tasks."hooks:setup"]
+description = "Install repository-local hk hooks through mise"
+run = '''
+if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+  echo "Install hooks from a standalone clone, not a linked worktree." >&2
+  exit 1
+fi
+hk install --mise
+'''
+
+[tasks.check]
+description = "Run all shared hk checks"
+run = "hk check --all"
+
+[tasks.ci]
+description = "Validate hk and run the shared checks"
+run = ["hk validate --deny-warnings", "hk check --all"]
+
+[tasks.package]
+description = "Build and inspect a Zig release archive"
+run = "python3 scripts/package.py build"
+
+[tasks."package:verify"]
+description = "Inspect a Zig release archive"
+run = "python3 scripts/package.py verify"
+
+[tasks."package:version"]
+description = "Print the Zig package version"
+run = "python3 scripts/package.py version"
+
+[tasks."package:tag"]
+description = "Check a release tag against build.zig.zon"
+run = "python3 scripts/package.py validate-tag"
+
+[tasks.install]
+description = "Install the native Zig executable and notices"
+depends = ["build:release"]
+run = "sh scripts/install.sh"
+
+[tasks."nix:check"]
+description = "Check the native Nix package and exported package names"
+run = """
+system=$(nix eval --impure --raw --expr builtins.currentSystem)
+test "$system" = "${NIX_SYSTEM:-$system}"
+nix flake check -L --no-update-lock-file
+nix build -L --no-link --no-update-lock-file .#default .#tmux-sessionizer
+"""
+
+[tasks."release:draft"]
+description = "Create a draft release from checked archives"
+run = 'gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes artifacts/*'
