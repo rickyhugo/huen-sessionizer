@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-SHIM = Path(__file__).with_name("tmux_shim.py")
+SHIM = Path(__file__).resolve().parents[2] / "src/app/tmux_shim.py"
 
 
 class TmuxShimTests(unittest.TestCase):
@@ -20,16 +20,16 @@ class TmuxShimTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "from pathlib import Path\n"
-            "with (Path(os.environ['TMS_COMPAT_ROOT']) / 'launched.jsonl').open('a') as log:\n"
+            "with (Path(os.environ['TMS_TEST_ROOT']) / 'launched.jsonl').open('a') as log:\n"
             "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "sys.exit(int(os.environ.get('TMS_FAKE_TMUX_EXIT', '0')))\n"
         )
         fake.chmod(0o755)
         self.env = {
             **os.environ,
-            "TMS_COMPAT_ROOT": str(self.root),
+            "TMS_TEST_ROOT": str(self.root),
             "TMS_REAL_TMUX": str(fake),
-            "TMS_COMPAT_SOCKET": "private-fixture-socket",
+            "TMS_TEST_SOCKET": "private-fixture-socket",
             "TMS_TMUX_SOCKET": "default",
             "TMS_FAKE_TMUX_EXIT": "0",
         }

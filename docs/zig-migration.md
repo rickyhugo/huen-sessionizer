@@ -1,5 +1,10 @@
 # Zig migration
 
+Historical migration record. The Rust comparison harnesses, fixtures, oracles,
+and benchmark tools described below were removed after four-platform Nix and
+mise CI passed. See [verification checkpoint](compatibility.md) for the final
+gate and [development](development.md) for current commands.
+
 Replace the Rust `tms` with Zig while preserving commands, configuration, repository discovery, session behavior, and the native picker.
 
 The reference is commit `a91ea21780acb58eced5b7f52da7f212f6ca33f0`.

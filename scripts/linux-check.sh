@@ -59,7 +59,7 @@ run non-utf8 zig test -lc --dep config --dep process -Mroot=src/repos.zig \
 	-Mconfig=src/config.zig -Mprocess=src/process.zig \
 	--test-filter "non UTF8 ordinary filename"
 run modules zig build test -j2 --summary all
-run harness-compat python3 -m unittest discover -s tests/compat -p 'test_*.py'
+run harness-app python3 -m unittest discover -s tests/app -p 'test_*.py'
 run harness-terminal python3 -m unittest discover -s tests/terminal -p 'test_*.py'
 run packaging python3 -m unittest discover -s tests/packaging -p 'test_*.py'
 run adapters python3 src/app/check.py --real-tmux
@@ -69,10 +69,8 @@ if ((last_status == 0)); then
 	run cli-errors python3 src/cli/error_check.py --bin zig-out/bin/tms
 	run repository-regressions python3 src/app/review_check.py --binary zig-out/bin/tms
 	run terminal python3 scripts/terminal_checks.py --binary zig-out/bin/tms \
-		--require-improvements --output "$output/terminal"
-	run compat python3 scripts/compat.py --jj --bin zig-out/bin/tms \
-		--oracle zig-out/bin/tms-oracle --artifacts "$output/compat"
-	sha256sum zig-out/bin/tms zig-out/bin/tms-oracle | tee "$output/binaries.sha256"
+		--output "$output/terminal"
+	sha256sum zig-out/bin/tms | tee "$output/binaries.sha256"
 fi
 
 if ((${#failed[@]})); then

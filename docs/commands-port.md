@@ -114,7 +114,9 @@ No fixed precedence across different basename groups is claimed.
 This worktree still has foundation implementations of configuration and picker.
 Full command differential and picker PTY verification require those workers.
 No full command parity result is claimed here.
-The existing `scripts/compat.py` and `scripts/compat_terminal.py` remain the integration gates.
+Current integration gates are `mise run test:commands` and
+`mise run test:terminal`. Migration comparison tooling was retired after
+verification; see [verification checkpoint](compatibility.md).
 
 The parent owns executable error rendering.
 `app.failure` exposes contextual payloads for session-not-found, mark-not-found, missing clone or init search paths, and clone-name inference failure.

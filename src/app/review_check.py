@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Check reviewed init/listing regressions on private compatibility sockets."""
+"""Check repository initialization and listing on private tmux sockets."""
 
 import argparse
 from contextlib import contextmanager
-import importlib.util
 import os
 from pathlib import Path
 import stat
 import tempfile
 
+from workspace import Workspace
+
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("compat", ROOT / "scripts/compat.py")
-compat = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(compat)
 TEMPLATES = ROOT / "src/repos/template"
 INVALID_BRANCHES = {
     "branch-empty": "",
@@ -100,7 +98,7 @@ def check_init(workspace, kind):
             for path in target.rglob("*")
             if path.is_file()
         }
-        assert not workspace.state([])["sessions"]
+        assert not workspace.sessions()
         return
 
     if kind.startswith("GIT_"):
@@ -147,7 +145,7 @@ def check_init(workspace, kind):
         assert not list((root / "redirect").iterdir())
 
 
-def check_listing(workspace, name, reference):
+def check_listing(workspace, name):
     workspace.setup(
         [
             [
@@ -162,9 +160,7 @@ def check_listing(workspace, name, reference):
         ]
     )
     result = workspace.run(["tms", "sessions"])
-    # Rust preserves the literal list name, but strips quotes from the current
-    # name. The fixed command also keeps current-session identity intact.
-    expected = name + ("  \n" if reference else "*  \n")
+    expected = name + "*  \n"
     assert result.returncode == 0, result
     assert result.stdout == expected, repr(result.stdout)
 
@@ -196,7 +192,7 @@ def check_config_sources(workspace, kind):
     result = workspace.run(["tms", "init-repo", "fresh"])
     assert result.returncode == status, result
     check_layout(workspace.root / "search/fresh/.git", expected)
-    assert len(workspace.state([])["sessions"]) == (0 if status else 1)
+    assert len(workspace.sessions()) == (0 if status else 1)
 
 
 def check_failure(workspace, kind):
@@ -204,7 +200,7 @@ def check_failure(workspace, kind):
     result = workspace.run(["tms", "init-repo", "fresh"])
     assert result.returncode == 1, result
     check_layout(workspace.root / "search/fresh/.git")
-    assert not workspace.state([])["sessions"]
+    assert not workspace.sessions()
 
 
 def check_shared(workspace):
@@ -216,7 +212,7 @@ def check_shared(workspace):
     result = workspace.run(["tms", "init-repo", "fresh"])
     assert result.returncode == 0, result
     check_layout(workspace.root / "search/fresh/.git")
-    assert len(workspace.state([])["sessions"]) == 1
+    assert len(workspace.sessions()) == 1
 
 
 def check_branch(workspace, kind):
@@ -231,19 +227,14 @@ def check_branch(workspace, kind):
     result = workspace.run(["tms", "init-repo", "fresh"])
     assert result.returncode == (0 if expected else 1), result
     check_layout(workspace.root / "search/fresh/.git", expected or "refs/heads/main")
-    assert len(workspace.state([])["sessions"]) == (1 if expected else 0)
+    assert len(workspace.sessions()) == (1 if expected else 0)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "zig-out/bin/tms")
-    parser.add_argument(
-        "--rust", type=Path, help="Also verify the retained Rust reference"
-    )
     args = parser.parse_args()
-    binaries = [(args.binary.resolve(strict=True), False)]
-    if args.rust:
-        binaries.append((args.rust.resolve(strict=True), True))
+    binary = args.binary.resolve(strict=True)
     cases = [
         "existing-empty",
         "existing-repository",
@@ -270,43 +261,42 @@ def main():
         "config-parameters-invalid",
     ]
     failures = 0
-    for binary, reference in binaries:
-        for case in (
-            cases
-            + config_cases
-            + list(INVALID_BRANCHES)
-            + branch_cases
-            + ["shared-group", "quo'te,ui", "'edge'", " a 'b,c "]
+    for case in (
+        cases
+        + config_cases
+        + list(INVALID_BRANCHES)
+        + branch_cases
+        + ["shared-group", "quo'te,ui", "'edge'", " a 'b,c "]
+    ):
+        with (
+            tempfile.TemporaryDirectory(prefix="tms-commands-") as directory,
+            fixed_umask(),
         ):
-            with (
-                tempfile.TemporaryDirectory(prefix="tms-review-") as directory,
-                fixed_umask(),
-            ):
-                workspace = compat.Workspace(Path(directory).resolve(), binary)
-                try:
-                    (workspace.root / "config.toml").write_text(
-                        "[[search_dirs]]\npath = '"
-                        + str(workspace.root / "search")
-                        + "'\ndepth = 1\n"
-                    )
-                    if case in cases:
-                        check_init(workspace, case)
-                    elif case in config_cases:
-                        check_config_sources(workspace, case)
-                    elif case in INVALID_BRANCHES:
-                        check_failure(workspace, case)
-                    elif case == "shared-group":
-                        check_shared(workspace)
-                    elif case in branch_cases:
-                        check_branch(workspace, case)
-                    else:
-                        check_listing(workspace, case, reference)
-                    print(f"PASS {'Rust' if reference else 'Zig'} {case}")
-                except (AssertionError, OSError) as error:
-                    failures += 1
-                    print(f"FAIL {'Rust' if reference else 'Zig'} {case}: {error}")
-                finally:
-                    workspace.close()
+            workspace = Workspace(Path(directory).resolve(), binary)
+            try:
+                (workspace.root / "config.toml").write_text(
+                    "[[search_dirs]]\npath = '"
+                    + str(workspace.root / "search")
+                    + "'\ndepth = 1\n"
+                )
+                if case in cases:
+                    check_init(workspace, case)
+                elif case in config_cases:
+                    check_config_sources(workspace, case)
+                elif case in INVALID_BRANCHES:
+                    check_failure(workspace, case)
+                elif case == "shared-group":
+                    check_shared(workspace)
+                elif case in branch_cases:
+                    check_branch(workspace, case)
+                else:
+                    check_listing(workspace, case)
+                print(f"PASS {case}")
+            except (AssertionError, OSError) as error:
+                failures += 1
+                print(f"FAIL {case}: {error}")
+            finally:
+                workspace.close()
     return bool(failures)
 
 

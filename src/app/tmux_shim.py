@@ -6,7 +6,7 @@ import sys
 
 
 def main():
-    root = Path(os.environ["TMS_COMPAT_ROOT"])
+    root = Path(os.environ["TMS_TEST_ROOT"])
     args = sys.argv[1:]
     with (root / "tmux-argv.jsonl").open("a") as log:
         log.write(json.dumps(args) + "\n")
@@ -28,7 +28,7 @@ def main():
         "-f",
         str(root / "tmux.conf"),
         "-L",
-        os.environ["TMS_COMPAT_SOCKET"],
+        os.environ["TMS_TEST_SOCKET"],
         *args,
     ]
     return subprocess.call(command)

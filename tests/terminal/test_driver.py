@@ -18,11 +18,6 @@ spec = importlib.util.spec_from_file_location(
 driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(driver)
 sys.modules["terminal_checks"] = driver
-spec = importlib.util.spec_from_file_location(
-    "benchmark", Path(__file__).parents[2] / "scripts" / "benchmark.py"
-)
-benchmark = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(benchmark)
 
 
 class ScreenTests(unittest.TestCase):
@@ -296,60 +291,6 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(observed["version"], "tms tmux-exit 2")
         self.assertFalse(self.log.exists(), "metadata launched unguarded tmux")
         close.assert_called_once_with()
-
-
-class BenchmarkTests(unittest.TestCase):
-    def sample(self, startup_count, search_count):
-        count = 1000
-        query = "project-0999"
-        terminal = SimpleNamespace(
-            started=time.perf_counter(),
-            screen=SimpleNamespace(text=f"> project-0000\n{startup_count}───\n> "),
-            save=lambda *args: None,
-            close=lambda: None,
-            exit=lambda: None,
-            restored=lambda: None,
-        )
-
-        def wait(predicate, label, **kwargs):
-            if not predicate(terminal.screen):
-                raise AssertionError("rejected " + label)
-
-        def send(data, label):
-            terminal.screen.text = f"> {query}\n{search_count}───\n> {query}"
-
-        terminal.wait, terminal.send = wait, send
-        fixture = SimpleNamespace(env={}, terminal=lambda *args, **kwargs: terminal)
-        with patch.object(
-            benchmark.subprocess, "run", return_value=SimpleNamespace(stdout="tms test")
-        ):
-            return benchmark.sample(
-                Path("fake-binary"), fixture, count, Path("."), "test"
-            )
-
-    def test_wrong_search_count_with_correct_selected_row_is_rejected(self):
-        for count in ("11/1000", "1/10000"):
-            with self.subTest(count=count):
-                with self.assertRaisesRegex(AssertionError, "unique search result"):
-                    self.sample("1000/1000", count)
-
-    def test_wrong_startup_count_is_rejected(self):
-        for count in ("11000/1000", "1000/10000"):
-            with self.subTest(count=count):
-                with self.assertRaisesRegex(AssertionError, "all candidates rendered"):
-                    self.sample(count, "1/1000")
-
-    def test_observed_counts_are_recorded(self):
-        sample = self.sample("1000/1000", "1/1000")
-        self.assertEqual(
-            sample["observed_counts"],
-            {
-                "startup": {"matched": 1000, "candidates": 1000},
-                "search": {"matched": 1, "candidates": 1000},
-            },
-        )
-        self.assertEqual(sample["matched"], 1)
-        self.assertEqual(sample["candidates"], 1000)
 
 
 if __name__ == "__main__":

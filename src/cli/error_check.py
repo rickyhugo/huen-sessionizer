@@ -243,11 +243,8 @@ def completion_output(shell, prefix, options):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, default=ROOT / "zig-out/bin/tms")
-    parser.add_argument("--reference", type=Path)
     args = parser.parse_args()
-    binaries = [args.bin.resolve(strict=True)]
-    if args.reference:
-        binaries.append(args.reference.resolve(strict=True))
+    binary = args.bin.resolve(strict=True)
     failures = 0
     (ROOT / ".zig-cache").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -264,65 +261,63 @@ def main():
         for key in ("COMPLETE", "TMUX"):
             env.pop(key, None)
         for case, stderr in CASES:
-            for binary in binaries:
-                config.write_bytes(original)
-                result = subprocess.run(
-                    [str(binary), *case],
-                    cwd=d,
-                    env=env,
-                    capture_output=True,
-                    timeout=10,
+            config.write_bytes(original)
+            result = subprocess.run(
+                [str(binary), *case],
+                cwd=d,
+                env=env,
+                capture_output=True,
+                timeout=10,
+            )
+            actual = (
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                config.read_bytes(),
+            )
+            expected = (2, b"", stderr.encode(), original)
+            if actual != expected:
+                failures += 1
+                print(
+                    f"FAIL {binary}: {case!r}\n"
+                    f"  expected: {expected!r}\n  actual: {actual!r}"
                 )
-                actual = (
-                    result.returncode,
-                    result.stdout,
-                    result.stderr,
-                    config.read_bytes(),
-                )
-                expected = (2, b"", stderr.encode(), original)
-                if actual != expected:
-                    failures += 1
-                    print(
-                        f"FAIL {binary}: {case!r}\n"
-                        f"  expected: {expected!r}\n  actual: {actual!r}"
-                    )
         completion_count = 0
         for context, options in SHORT_OPTIONS:
             for token in ("-h=x", "-h=", "-hx=y"):
                 words = ["tms", *context, token]
                 for shell in ("bash", "elvish", "fish", "powershell", "zsh"):
                     completion_count += 1
-                    for binary in binaries:
-                        config.write_bytes(original)
-                        result = subprocess.run(
-                            [str(binary), "--", *words],
-                            cwd=d,
-                            env=env
-                            | {
-                                "COMPLETE": shell,
-                                "_CLAP_COMPLETE_INDEX": str(len(words) - 1),
-                            },
-                            capture_output=True,
-                            timeout=10,
+                    config.write_bytes(original)
+                    result = subprocess.run(
+                        [str(binary), "--", *words],
+                        cwd=d,
+                        env=env
+                        | {
+                            "COMPLETE": shell,
+                            "_CLAP_COMPLETE_INDEX": str(len(words) - 1),
+                        },
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    actual = (
+                        result.returncode,
+                        result.stdout,
+                        result.stderr,
+                        config.read_bytes(),
+                    )
+                    expected = (
+                        0,
+                        completion_output(shell, token, options),
+                        b"",
+                        original,
+                    )
+                    if actual != expected:
+                        failures += 1
+                        print(
+                            f"FAIL {binary}: {shell} {words!r}\n"
+                            f"  expected: {expected!r}\n  actual: {actual!r}"
                         )
-                        actual = (
-                            result.returncode,
-                            result.stdout,
-                            result.stderr,
-                            config.read_bytes(),
-                        )
-                        expected = (
-                            0,
-                            completion_output(shell, token, options),
-                            b"",
-                            original,
-                        )
-                        if actual != expected:
-                            failures += 1
-                            print(
-                                f"FAIL {binary}: {shell} {words!r}\n"
-                                f"  expected: {expected!r}\n  actual: {actual!r}"
-                            )
     print(f"{len(CASES)} CLI diagnostic/preservation cases; {failures} failures")
     print(f"{completion_count} short-option completion cases")
     return bool(failures)

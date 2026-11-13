@@ -49,6 +49,12 @@ def graph(root, process, root_deps, catalog_config=False):
 
 
 def run(args, env=None):
+    # Git hooks export repository paths that must not reach fixture repositories.
+    env = {
+        key: value
+        for key, value in (os.environ if env is None else env).items()
+        if not key.startswith("GIT_")
+    }
     subprocess.run(args, cwd=ROOT, env=env, check=True)
 
 

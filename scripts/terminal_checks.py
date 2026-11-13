@@ -501,11 +501,7 @@ def ready(screen, total=5):
     )
 
 
-class BaselineDefect(AssertionError):
-    pass
-
-
-def run_pty_checks(binary, output, strict):
+def run_pty_checks(binary, output):
     results = []
     fixture = Fixture()
 
@@ -519,9 +515,7 @@ def run_pty_checks(binary, output, strict):
             results.append(
                 {
                     "name": name,
-                    "status": "BASELINE_DEFECT"
-                    if isinstance(error, BaselineDefect) and not strict
-                    else "FAIL",
+                    "status": "FAIL",
                     "detail": str(error),
                 }
             )
@@ -613,7 +607,7 @@ def run_pty_checks(binary, output, strict):
         t.send("界".encode(), "insert wide scalar")
         t.wait(lambda s: "> 界" in s.text, "wide scalar visible")
         if t.screen.x != 4:
-            raise BaselineDefect(f"wide scalar cursor column {t.screen.x}, expected 4")
+            raise AssertionError(f"wide scalar cursor column {t.screen.x}, expected 4")
 
     case("wide-cursor", wide_cursor)
 
@@ -640,18 +634,18 @@ def run_pty_checks(binary, output, strict):
         t.send(b"\x1b[D", "redraw tiny picker")
         t.wait(lambda s: len(t.raw) > offset, "tiny picker redraw")
         if t.screen.invalid_positions:
-            raise BaselineDefect(
+            raise AssertionError(
                 f"cursor outside tiny terminal {t.screen.invalid_positions}"
             )
         t.send(b"\x03", "cancel tiny picker")
         try:
             code = t.exit(expected=None)
         except AssertionError as error:
-            raise BaselineDefect(
+            raise AssertionError(
                 f"{error}; out-of-bounds cursor positions {t.screen.invalid_positions}"
             ) from error
         if code != 0 or t.screen.invalid_positions:
-            raise BaselineDefect(
+            raise AssertionError(
                 f"tiny picker exit {code}; cursor positions {t.screen.invalid_positions}"
             )
         t.restored()
@@ -663,10 +657,7 @@ def run_pty_checks(binary, output, strict):
         t.snapshot("before " + signum.name)
         os.kill(t.target_pid, signum)
         t.exit(expected=None)
-        try:
-            t.restored()
-        except AssertionError as error:
-            raise BaselineDefect(str(error)) from error
+        t.restored()
 
     for signum in (signal.SIGTERM, signal.SIGHUP):
         case(
@@ -1142,18 +1133,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default=os.environ.get("TMS_BIN"))
     parser.add_argument("--output", type=Path, default=Path("terminal-results"))
-    parser.add_argument(
-        "--require-improvements",
-        action="store_true",
-        help="Make known Rust cursor, tiny-size, SIGTERM, and SIGHUP defects fail",
-    )
     parser.add_argument("--pty-only", action="store_true")
     args = parser.parse_args()
     if not args.binary:
         parser.error("--binary or TMS_BIN is required")
     binary = Path(args.binary).resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    results = run_pty_checks(binary, args.output, args.require_improvements)
+    results = run_pty_checks(binary, args.output)
     if not args.pty_only:
         results += run_popup_checks(binary, args.output)
     report = {"artifact": artifact(binary), "results": results}

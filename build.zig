@@ -54,12 +54,6 @@ pub fn build(b: *std.Build) void {
     run.addPassthruArgs();
     b.step("run", "Run tms").dependOn(&run.step);
 
-    const oracle = module(b, "oracle", target, optimize);
-    oracle.addImport("matcher", matcher);
-    const oracle_exe = b.addExecutable(.{ .name = "tms-oracle", .root_module = oracle });
-    b.installArtifact(oracle_exe);
-    b.step("oracle", "Build and install the headless ranking oracle").dependOn(&b.addInstallArtifact(oracle_exe, .{}).step);
-
     const contracts = module(b, "contracts", target, optimize);
     for (domains) |domain| contracts.addImport(domain.name, domain.module);
     contracts.addImport("app", app);
@@ -69,7 +63,7 @@ pub fn build(b: *std.Build) void {
         if (target.result.abi.isMusl()) tests.linkage = .static;
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
-    for ([_]*std.Build.Module{ app, main, oracle, contracts }) |root| {
+    for ([_]*std.Build.Module{ app, main, contracts }) |root| {
         const tests = b.addTest(.{ .root_module = root });
         if (target.result.abi.isMusl()) tests.linkage = .static;
         test_step.dependOn(&b.addRunArtifact(tests).step);

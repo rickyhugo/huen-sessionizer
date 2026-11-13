@@ -23,31 +23,25 @@ description = "Verify tmux arguments, command policies, and a private tmux lifec
 run = "python3 src/app/check.py --real-tmux"
 
 [tasks."test:harness"]
-description = "Check compatibility test isolation"
+description = "Check test isolation and packaging policy"
 run = [
-  "python3 -m unittest discover -s tests/compat -p 'test_*.py'",
+  "python3 -m unittest discover -s tests/app -p 'test_*.py'",
   "python3 -m unittest discover -s tests/terminal -p 'test_*.py'",
   "python3 -m unittest discover -s tests/packaging -p 'test_*.py'",
 ]
 
-[tasks."test:compat"]
-description = "Compare Zig commands and ranking with the Rust fixtures"
+[tasks."test:commands"]
+description = "Check CLI diagnostics, repository initialization, and session listing"
 depends = ["test:harness", "build:release"]
 run = [
-  "python3 scripts/compat.py --jj --bin zig-out/bin/tms --oracle zig-out/bin/tms-oracle",
   "python3 src/cli/error_check.py --bin zig-out/bin/tms",
   "python3 src/app/review_check.py --binary zig-out/bin/tms",
 ]
 
 [tasks."test:terminal"]
-description = "Exercise the Zig picker in isolated tmux terminals"
-depends = ["build"]
-run = "python3 scripts/compat_terminal.py --bin zig-out/bin/tms"
-
-[tasks."test:terminal:strict"]
-description = "Verify Zig PTY and popup behavior with Unicode and cleanup fixes"
+description = "Verify PTY and popup behavior, Unicode layout, and terminal cleanup"
 depends = ["test:harness", "build:release"]
-run = "python3 scripts/terminal_checks.py --binary zig-out/bin/tms --require-improvements --output .audit/terminal"
+run = "python3 scripts/terminal_checks.py --binary zig-out/bin/tms --output .audit/terminal"
 
 [tasks."test:picker:regressions"]
 description = "Verify cancellation under blocked output and fragmented input"

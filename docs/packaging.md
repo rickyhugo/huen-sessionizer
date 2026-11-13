@@ -12,11 +12,10 @@ mise run ci
 ```
 
 CI and local hooks use the same hk checks: formatting, Zig tests, harness
-isolation, command adapters, 42 command cases, 25 ranking vectors, 21 terminal
-and popup scenarios, and nine focused picker regressions.
-Command and terminal compatibility use the release executable.
-Rust source and tooling were retired after these checks passed.
-Reference fixtures and recorded evidence remain unchanged.
+isolation, packaging policy, command adapters, CLI/repository regressions,
+21 terminal/popup scenarios, and 16 focused picker regressions.
+Command and terminal checks use the release executable. Migration comparison
+tools and fixtures were retired after verification and four-platform Nix success.
 
 hk 2.12.0 has no upstream Intel macOS binary. Full developer checks therefore
 run on Apple Silicon and Linux x86-64. Source installs, archives, and Nix builds

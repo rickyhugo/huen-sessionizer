@@ -1,5 +1,9 @@
 # Terminal verification
 
+Historical reference report. Its comparison tools and linked artifacts are
+retained in commit `9fd6bbd2517606b7575ecf6bfdd2772e3400d2f1`.
+See [development](development.md) for current terminal checks.
+
 This report records independent verification for the Rust-to-Zig rewrite. It does not verify a Zig binary.
 
 ## Reference artifact

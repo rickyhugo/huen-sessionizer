@@ -37,24 +37,22 @@ MISE_AUTO_INSTALL=false mise run build:release
 
 These tasks run `zig build`, `zig build test`, and
 `zig build -Doptimize=ReleaseFast`. The application is `zig-out/bin/tms`.
-The build also installs `zig-out/bin/tms-oracle` for ranking checks.
 
 Focused checks:
 
 ```sh
 MISE_AUTO_INSTALL=false mise run test:harness
 MISE_AUTO_INSTALL=false mise run test:adapters
-MISE_AUTO_INSTALL=false mise run test:compat
-MISE_AUTO_INSTALL=false mise run test:terminal:strict
+MISE_AUTO_INSTALL=false mise run test:commands
+MISE_AUTO_INSTALL=false mise run test:terminal
 MISE_AUTO_INSTALL=false mise run test:picker:regressions
 MISE_AUTO_INSTALL=false mise exec -- python3 -m unittest discover -s tests/packaging -p 'test_*.py'
 ```
 
-Command compatibility checks all 42 stored command cases and 25 Rust ranking
-vectors, plus CLI error and no-write regressions. Strict terminal checks run
-21 real PTY/popup scenarios. The picker regression task runs 16 focused
-scenarios. Compatibility tasks build the
-release executable before checking it.
+Command regressions check CLI errors, configuration preservation, shell
+completion, repository initialization, and literal session names. Terminal
+checks run 21 real PTY/popup scenarios. The picker regression task runs 16
+focused scenarios. Command and terminal tasks build the release executable.
 
 Packaging policy tests use an independent notice list. They check real archive
 writing, verification, source installation, and negative cases. Compilation is
@@ -76,8 +74,8 @@ MISE_AUTO_INSTALL=false mise run ci
 ```
 
 `hk.pkl` defines checks shared by local hooks and CI: Zig formatting, module
-tests, a release build, harness isolation, command adapters, command/ranking
-compatibility, strict terminal compatibility, and picker regressions.
+tests, a release build, harness isolation, packaging policy, command adapters,
+CLI/repository regressions, terminal checks, and picker regressions.
 `check` runs `hk check --all`. `ci` first validates hk with warnings denied,
 then runs the same check. Neither task runs Rust.
 
@@ -102,22 +100,6 @@ The Nix package uses its own hash-pinned Zig compiler.
 See [packaging](packaging.md) for source installation, release commands, Nix
 details, and platform verification limits.
 
-## Reproduce the Rust reference
-
-The behavioral reference is `a91ea21780acb58eced5b7f52da7f212f6ca33f0`.
-The last pre-retirement revision below retains that Rust implementation,
-its oracle, pinned Rust 1.99.0, and the compatibility harness:
-
-```sh
-git worktree add --detach ../tms-rust-reference 3ad4fdaada461f84d150ed516a3234dd1861ffbb
-cd ../tms-rust-reference
-mise trust
-mise install --locked
-TMS_BIN="$PWD/target/debug/tms" MISE_AUTO_INSTALL=false mise run test:compat:rust
-TMS_BIN="$PWD/target/debug/tms" MISE_AUTO_INSTALL=false mise run test:terminal:rust
-```
-
-These tasks build the Rust application and ranking oracle before replay.
-Keep reference work outside the current Zig checkout. Do not capture new
-goldens from the Zig candidate. See [compatibility](compatibility.md) for the
-fixture protocol, isolation rules, and recorded reference defects.
+The migration-only Rust comparison tools, goldens, and ranking oracle were
+removed after compatibility verification and successful native Nix builds on
+all four systems. See [verification checkpoint](compatibility.md) for evidence.

@@ -1,7 +1,7 @@
 # Zig worker interfaces
 
-These are the integrated Zig domain contracts. The implementation and compatibility
-gates are wired; recorded Rust fixtures remain the behavioral reference.
+These are the integrated Zig domain contracts. Module and executable regression
+tests verify the implementation; migration-only comparison tools are retired.
 
 ## Ownership
 
@@ -143,7 +143,7 @@ Detection is shallow. Resolution is lazy and cannot fall back to another provide
 
 `WorkspaceSet.active_other` serves refresh and excludes the current jj workspace. `registered` serves generated catalog entries and includes workspace-store records. Git worktree names use administrative IDs. `Submodule.name` retains the provider's name for session naming. `cloneRepo` creates the target directory, inherits output, waits, and preserves the baseline's ignored nonzero exit. Other spawn failures remain errors.
 
-## Matcher and oracle
+## Matcher
 
 These signatures belong to `src/matcher.zig`:
 
@@ -156,16 +156,8 @@ This entry point is pure except allocator use. It preserves Nucleo query grammar
 `src/matcher.zig` exposes `src/matcher/engine.zig`'s `rank` with the same argument
 and result types. Matching internals remain private to that directory.
 
-The default build installs `zig-out/bin/tms-oracle`. `zig build oracle` builds and installs only this executable. Its protocol is:
-
-```sh
-tms-oracle rank QUERY ITEM...
-```
-
-The oracle calls `matcher.rank`, then prints each original `ITEM` selected by
-its ranked index, one per line. It performs no label lookup or deduplication.
-Invalid protocol exits 2. `mise run test:compat` checks all 25 stored Rust ranking
-vectors through this Zig oracle, alongside command compatibility.
+Matcher module tests exercise ranking directly. The migration-only executable
+oracle and stored Rust comparison vectors have been removed.
 
 ## Picker
 
@@ -251,10 +243,10 @@ pub fn movePath(io: Io, a: A, from: []const u8, to: []const u8) anyerror!void;
 
 ## Integrated checks
 
-`mise run build` installs tms and the oracle. `mise run test` compiles every public domain declaration and Client method, then runs all module tests. Contract tests check optional collection presence, stable identity across reordered injection, and scalar cursor representation. The oracle test checks output order, original Unicode bytes, and duplicate labels without claiming matcher parity.
+`mise run build` installs tms. `mise run test` compiles every public domain declaration and Client method, then runs all module tests. Contract tests check optional collection presence, stable identity across reordered injection, and scalar cursor representation.
 
 `mise run fmt` formats Zig through hk. `mise run ci` validates hk, checks
 formatting, tests Zig, builds ReleaseFast, and runs harness isolation, command
-adapters, command/ranking compatibility, strict terminal/popup checks, and
-focused picker regressions. Rust tooling was retired after compatibility passed.
+adapters, command regressions, terminal/popup checks, and focused picker
+regressions. Rust tooling was retired after compatibility passed.
 See [development](development.md) for commands and Rust reference reproduction.
