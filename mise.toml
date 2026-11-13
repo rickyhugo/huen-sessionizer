@@ -94,15 +94,6 @@ description = "Install the native Zig executable and notices"
 depends = ["build:release"]
 run = "sh scripts/install.sh"
 
-[tasks."nix:check"]
-description = "Check the native Nix package and exported package names"
-run = """
-system=$(nix eval --impure --raw --expr builtins.currentSystem)
-test "$system" = "${NIX_SYSTEM:-$system}"
-nix flake check -L --no-update-lock-file
-nix build -L --no-link --no-update-lock-file .#default .#tmux-sessionizer
-"""
-
 [tasks."release:draft"]
 description = "Create a draft release from checked archives"
 run = 'gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes artifacts/*'

@@ -259,13 +259,3 @@ It is retained both in the container and in the host verification worktree.
 The source checksum manifest is `.audit/linux/source-final.sha256`.
 The final summary records `suite=1 fresh-modules=0`.
 The suite failure is only the two known command differences.
-
-## Nix availability
-
-A separate native aarch64 container ran `nix --version` successfully.
-It reports Nix 2.35.6.
-The image is `nixos/nix@sha256:b49cb33f3a7e5cf3933ad8774529de0e3807ec5cf54987aa7ccdfb49f2fc55ed`.
-The probe container used `--rm` and is gone.
-The image remains cached in the dedicated profile.
-Subsequent package and sandbox verification is recorded in
-[Nix verification](nix-verification.md).

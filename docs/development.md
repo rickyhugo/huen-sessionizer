@@ -19,7 +19,7 @@ commands. No shell activation is required. Set `MISE_AUTO_INSTALL=false` after
 installation to prevent commands from installing missing tools.
 
 hk 2.12.0 has no Intel macOS binary. Run the full shared checks on Apple Silicon
-or Linux. Intel Mac source installs and native Nix/archive builds do not need hk.
+or Linux. Intel Mac source installs and archive builds do not need hk.
 For source installation only, install `mise install --locked zig python`, then
 run `MISE_AUTO_INSTALL=false mise run install`.
 
@@ -87,18 +87,15 @@ hk applies available formatting fixes before a commit.
 ## Workflows and packaging
 
 `.github/workflows/ci.yml` installs locked tools and calls `mise run ci` on
-Linux x86-64 and Apple Silicon. `nix.yml` checks native packages and development
-shells on all four supported Nix systems. `release.yml` requires both workflows
-before building and inspecting the four release archives.
+Linux x86-64 and Apple Silicon. `release.yml` requires those checks before
+building and inspecting the four release archives.
 
 Pull requests and manual release dispatches upload artifacts only. A matching
 `v*` tag in `rickyhugo/huen-sessionizer` creates a draft release after the gates
 pass. Publishing that draft is a separate action. Cargo publishing is removed.
 
-`nix develop` supplies pinned mise, not a second developer Zig toolchain.
-The Nix package uses its own hash-pinned Zig compiler.
-See [packaging](packaging.md) for source installation, release commands, Nix
-details, and platform verification limits.
+See [packaging](packaging.md) for source installation, release commands,
+and platform verification limits.
 
 The migration-only Rust comparison tools, goldens, and ranking oracle were
 removed after compatibility verification and successful native Nix builds on

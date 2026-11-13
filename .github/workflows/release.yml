@@ -12,11 +12,9 @@ permissions:
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
-  nix:
-    uses: ./.github/workflows/nix.yml
 
   package:
-    needs: [checks, nix]
+    needs: [checks]
     strategy:
       fail-fast: false
       matrix:
