@@ -50,9 +50,7 @@ pub fn reduce(a: A, state: *State, event: Event, options: config.PickerOptions) 
             return .redraw;
         },
         .key => |key| {
-            const action = for (options.bindings) |binding| {
-                if (std.meta.eql(key, binding.key)) break binding.action;
-            } else null;
+            const action = boundAction(key, options);
             const count = std.unicode.utf8CountCodepoints(state.query.items) catch unreachable;
             const old_cursor = state.scalar_cursor;
             var start = bytePosition(state.query.items, old_cursor);
@@ -170,6 +168,14 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
         }
         var rematch = false;
         while (decoder.next(!ready)) |key| {
+            // Selection keys must see matches for the query typed before them.
+            if (rematch) if (boundAction(key, options)) |action| switch (action) {
+                .confirm, .move_up, .move_down => {
+                    rematch = false;
+                    try rank(scratch, &state, labels, &ranked, options);
+                },
+                else => {},
+            };
             switch (try reduce(scratch, &state, .{ .key = key }, options)) {
                 .cancel => return null,
                 .confirm => return items[state.ranked[state.selection.?]].id,
@@ -180,13 +186,23 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
         }
         // A paste or key burst ranks once, not once per key.
         if (rematch) {
-            const next = try matcher.rank(scratch, state.query.items, labels);
-            scratch.free(ranked);
-            ranked = next;
-            _ = try reduce(scratch, &state, .{ .matches = ranked }, options);
+            try rank(scratch, &state, labels, &ranked, options);
             dirty = true;
         }
     }
+}
+
+fn boundAction(key: config.Key, options: config.PickerOptions) ?config.PickerAction {
+    return for (options.bindings) |binding| {
+        if (std.meta.eql(key, binding.key)) break binding.action;
+    } else null;
+}
+
+fn rank(scratch: A, state: *State, labels: []const []const u8, ranked: *[]usize, options: config.PickerOptions) !void {
+    const next = try matcher.rank(scratch, state.query.items, labels);
+    scratch.free(ranked.*);
+    ranked.* = next;
+    _ = try reduce(scratch, state, .{ .matches = ranked.* }, options);
 }
 
 /// Fetches one preview at a time in the background so navigation never waits on tmux or the filesystem.
@@ -195,17 +211,20 @@ const Previews = struct {
     cache: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
     pending: ?struct { item: usize, future: Io.Future([]const u8) } = null,
     done: std.atomic.Value(bool) = .init(false),
+    /// The item fetched most recently; selecting any other item fetches again so revisits refresh.
+    requested: ?usize = null,
 
     fn deinit(self: *Previews, io: Io) void {
         if (self.pending) |*job| _ = job.future.cancel(io);
         self.arena.deinit();
     }
 
-    /// Returns the cached preview, or "" while it loads.
+    /// Returns the last preview fetched for `item`, or "" before its first fetch completes.
     fn text(self: *Previews, io: Io, items: []const Item, item: usize) ![]const u8 {
         if (items[item].preview == .none) return "";
-        if (self.cache.get(item)) |cached| return cached;
-        if (self.pending != null) return "";
+        const cached = self.cache.get(item) orelse "";
+        if (self.pending != null or self.requested == item) return cached;
+        self.requested = item;
         self.done.store(false, .monotonic);
         const future = io.concurrent(fetch, .{ io, self.arena.allocator(), items[item].preview, &self.done }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => {
@@ -215,7 +234,7 @@ const Previews = struct {
             },
         };
         self.pending = .{ .item = item, .future = future };
-        return "";
+        return cached;
     }
 
     /// Stores a finished preview; true means the screen should redraw.

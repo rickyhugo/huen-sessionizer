@@ -27,6 +27,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "select")) {
+        const select_bindings = [_]config.Binding{
+            .{ .key = .{ .code = .esc }, .action = .cancel },
+            .{ .key = .{ .code = .enter }, .action = .confirm },
+            .{ .key = .{ .code = .down }, .action = .move_down },
+        };
+        const items = [_]picker.Item{ .{ .id = 1, .label = "alpha" }, .{ .id = 2, .label = "beta" } };
+        const chosen = try picker.choose(init.io, init.gpa, init.gpa, &items, .{ .colors = .{}, .input_position = .top, .bindings = &select_bindings });
+        std.process.exit(@intCast(chosen orelse 3));
+    }
     const bindings = [_]config.Binding{
         .{ .key = .{ .code = .esc }, .action = .cancel },
         .{ .key = .{ .code = .{ .char = 'c' }, .modifiers = .{ .ctrl = true } }, .action = .cancel },
