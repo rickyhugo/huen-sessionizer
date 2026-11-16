@@ -63,6 +63,10 @@ pub fn lower(cp: u21) u21 {
     return mapping(&tables.case_fold, cp);
 }
 
+pub fn isUpper(cp: u21) bool {
+    return lower(cp) != cp;
+}
+
 pub fn asciiWhitespace(cp: u21) bool {
     return cp == ' ' or cp == '\t' or cp == '\n' or cp == '\x0c' or cp == '\r';
 }
@@ -82,6 +86,17 @@ pub fn class(cp: u21) Class {
         return .non_word;
     }
     return @fromBackingInt(@intCast(rangeValue(&tables.classes, cp, 1)));
+}
+
+fn category(cp: u21) Grapheme {
+    return @fromBackingInt(@intCast(rangeValue(&tables.graphemes, cp, 0)));
+}
+
+fn linker(cp: u21) bool {
+    return switch (cp) {
+        0x94d, 0x9cd, 0xacd, 0xb4d, 0xc4d, 0xd4d => true,
+        else => false,
+    };
 }
 
 const GraphemeState = struct {
@@ -106,6 +121,22 @@ const GraphemeState = struct {
         if (previous == .regional and next == .regional and self.regional_count % 2 == 1) return false;
         return true;
     }
+
+    fn advance(self: *GraphemeState, cp: u21, next: Grapheme) void {
+        self.zwj_after_pictographic = next == .zwj and self.pictographic_extend;
+        if (next != .extend) self.pictographic_extend = next == .pictographic;
+        if (next == .consonant) {
+            self.consonant = true;
+            self.linked = false;
+        } else if (linker(cp)) {
+            self.linked = self.consonant;
+        } else if (rangeValue(&tables.incb_extend, cp, 0) == 0) {
+            self.consonant = false;
+            self.linked = false;
+        }
+        self.regional_count = if (next == .regional) self.regional_count + 1 else 0;
+        self.previous = next;
+    }
 };
 
 pub const Text = struct {
@@ -115,33 +146,26 @@ pub const Text = struct {
 
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8, buffer: *std.ArrayList(u21)) !Text {
     buffer.clearRetainingCapacity();
-    const ascii = for (bytes) |byte| {
-        if (byte >= 128) break false;
-    } else true;
+    var ascii = true;
+    for (bytes) |byte| {
+        if (byte >= 128) {
+            ascii = false;
+            break;
+        }
+    }
     if (ascii) {
         try buffer.ensureTotalCapacity(allocator, bytes.len);
         for (bytes) |byte| buffer.appendAssumeCapacity(byte);
-        return .{ .chars = buffer.items, .ascii = true };
-    }
-    var iterator = (try std.unicode.Utf8View.init(bytes)).iterator();
-    var state: GraphemeState = .{};
-    while (iterator.nextCodepoint()) |cp| {
-        const next: Grapheme = @fromBackingInt(@intCast(rangeValue(&tables.graphemes, cp, 0)));
-        if (state.boundary(next)) try buffer.append(allocator, cp);
-        state.zwj_after_pictographic = next == .zwj and state.pictographic_extend;
-        if (next != .extend) state.pictographic_extend = next == .pictographic;
-        if (next == .consonant) {
-            state.consonant = true;
-            state.linked = false;
-        } else switch (cp) {
-            0x94d, 0x9cd, 0xacd, 0xb4d, 0xc4d, 0xd4d => state.linked = state.consonant,
-            else => if (rangeValue(&tables.incb_extend, cp, 0) == 0) {
-                state.consonant = false;
-                state.linked = false;
-            },
+    } else {
+        var iterator = (try std.unicode.Utf8View.init(bytes)).iterator();
+        var state: GraphemeState = .{};
+        var first = true;
+        while (iterator.nextCodepoint()) |cp| {
+            const next = category(cp);
+            if (first or state.boundary(next)) try buffer.append(allocator, cp);
+            first = false;
+            state.advance(cp, next);
         }
-        state.regional_count = if (next == .regional) state.regional_count + 1 else 0;
-        state.previous = next;
     }
-    return .{ .chars = buffer.items, .ascii = false };
+    return .{ .chars = buffer.items, .ascii = ascii };
 }
