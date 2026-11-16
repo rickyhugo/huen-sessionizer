@@ -41,7 +41,7 @@ on a glibc 2.28 host.
 ```sh
 mise run package -- --target aarch64-apple-darwin --smoke
 mise run package:verify -- \
-  target/distrib/tms-0.6.1-aarch64-apple-darwin.tar.gz \
+  target/distrib/tms-0.1.0-aarch64-apple-darwin.tar.gz \
   --target aarch64-apple-darwin --smoke
 ```
 
