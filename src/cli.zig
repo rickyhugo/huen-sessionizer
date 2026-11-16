@@ -29,6 +29,7 @@ pub const Command = union(enum) {
     rename: []const u8,
     refresh: ?[]const u8,
     clone_repo: struct { repository: []const u8, path: ?[]const u8, name: ?[]const u8 },
+    add: []const u8,
     init_repo: []const u8,
     bookmark: struct { delete: bool, path: ?[]const u8 },
     open_session: []const u8,
@@ -312,6 +313,7 @@ const Parser = struct {
             .rename => .{ .rename = p.positional.? },
             .refresh => .{ .refresh = p.positional },
             .clone_repo => .{ .clone_repo = .{ .repository = p.positional.?, .path = p.one(.path), .name = p.one(.name) } },
+            .add => .{ .add = p.positional.? },
             .init_repo => .{ .init_repo = p.positional.? },
             .bookmark => .{ .bookmark = .{ .delete = p.flag(.delete), .path = p.positional } },
             .open_session => .{ .open_session = p.positional.? },
@@ -340,6 +342,7 @@ test "typed CLI commands preserve absent values and literal strings" {
     try std.testing.expectEqual(@as(usize, 3), (try parse(a, &.{ "marks", "+3" })).marks.open);
     try std.testing.expect((try parse(a, &.{ "marks", "delete", "-a" })).marks == .clear);
     try std.testing.expectEqualStrings("a", (try parse(a, &.{ "clone-repo", "--path=a", "--name", "b", "url" })).clone_repo.path.?);
+    try std.testing.expectEqualStrings("git@github.com:o/r.git", (try parse(a, &.{ "add", "git@github.com:o/r.git" })).add);
 }
 
 test "CLI diagnostics reject invalid values and conflicting commands" {

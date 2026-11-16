@@ -12,6 +12,7 @@ const Env = std.process.Environ.Map;
 
 pub const Failure = union(enum) {
     session_not_found: []const u8,
+    unsupported_remote: []const u8,
     mark_not_found: usize,
     no_search_path,
     invalid_repository_name,
@@ -249,6 +250,31 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
             };
             const session_name = try app.newRepoSession(name, target);
             if (should_switch) try client.switchTo(io, a, session_name);
+        },
+        .add => |text| {
+            const location = repos.parseRemote(a, text) catch |err| switch (err) {
+                error.UnsupportedRemote => {
+                    failure = .{ .unsupported_remote = text };
+                    return err;
+                },
+                else => return err,
+            };
+            const host_dir = try std.fs.path.join(a, &.{ try config.expandPath(io, a, env, "~"), location.host });
+            const target = try std.fs.path.join(a, &.{ host_dir, location.path });
+            if (try repos.detect(io, target, &.{.git}) == null) {
+                try repos.cloneRepo(io, a, location.url, target);
+                if (try repos.detect(io, target, &.{.git}) == null) {
+                    // Only succeeds when the failed clone left the directory empty.
+                    Io.Dir.cwd().deleteDir(io, target) catch {};
+                    return error.GitError;
+                }
+            }
+            if (!try config.searchReaches(io, a, env, &cfg, target)) {
+                const depth = std.mem.count(u8, location.path, "/") + 1;
+                try config.commit(io, a, env, &cfg, .{ .add_search_dir = .{ .path = host_dir, .depth = depth } });
+            }
+            const name = std.fs.path.basename(target);
+            try sessions.open(io, a, .{ .key = name, .name = name, .source = .{ .repository = .{ .path = target, .provider = .git } } }, client, &cfg);
         },
         .init_repo => |name| {
             const root = (try app.searchPath()) orelse return;

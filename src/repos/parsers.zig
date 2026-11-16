@@ -321,3 +321,80 @@ test "checkout name preserves raw workspace names and old default fallback" {
     try std.testing.expectEqualStrings("default", try checkoutName(""));
     try std.testing.expectError(error.InvalidWorkspaceStore, checkoutName("\x1a\x01\xff"));
 }
+
+/// Where a remote lives: `host` is lowercase without user or port, `path` has no `.git` suffix,
+/// and `url` is what `git clone` receives.
+pub const Remote = struct { host: []const u8, path: []const u8, url: []const u8 };
+
+/// Accepts scheme URLs, scp-like `user@host:path`, and bare `host/path`, which clones over HTTPS.
+pub fn remote(a: A, text: []const u8) !Remote {
+    var url = text;
+    var authority: []const u8 = undefined;
+    var path: []const u8 = undefined;
+    if (std.mem.indexOf(u8, text, "://")) |separator| {
+        const schemes = [_][]const u8{ "https", "http", "ssh", "git", "git+ssh", "ssh+git" };
+        const scheme = text[0..separator];
+        for (schemes) |known| {
+            if (std.ascii.eqlIgnoreCase(scheme, known)) break;
+        } else return error.UnsupportedRemote;
+        const rest = text[separator + 3 ..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.UnsupportedRemote;
+        authority = rest[0..slash];
+        path = rest[slash + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, text, ':')) |colon| {
+        if (std.mem.indexOfScalar(u8, text[0..colon], '/') != null) return error.UnsupportedRemote;
+        authority = text[0..colon];
+        path = text[colon + 1 ..];
+    } else {
+        const slash = std.mem.indexOfScalar(u8, text, '/') orelse return error.UnsupportedRemote;
+        authority = text[0..slash];
+        path = text[slash + 1 ..];
+        if (std.mem.indexOfScalar(u8, authority, '.') == null) return error.UnsupportedRemote;
+        url = try std.fmt.allocPrint(a, "https://{s}", .{text});
+    }
+    var host = authority[if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| at + 1 else 0..];
+    if (std.mem.indexOfScalar(u8, host, ':')) |colon| host = host[0..colon];
+    if (host.len == 0 or host[0] == '[' or std.mem.eql(u8, host, ".") or std.mem.eql(u8, host, "..")) return error.UnsupportedRemote;
+    path = std.mem.trim(u8, path, "/");
+    while (std.mem.endsWith(u8, path, ".git")) path = std.mem.trimEnd(u8, path[0 .. path.len - 4], "/");
+    if (path.len == 0) return error.UnsupportedRemote;
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..") or segment[0] == '~')
+            return error.UnsupportedRemote;
+    }
+    return .{ .host = try std.ascii.allocLowerString(a, host), .path = path, .url = url };
+}
+
+test "remotes map to host and path across URL forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { text: []const u8, host: []const u8, path: []const u8, url: []const u8 }{
+        .{ .text = "https://github.com/rickyhugo/huen-wm", .host = "github.com", .path = "rickyhugo/huen-wm", .url = "https://github.com/rickyhugo/huen-wm" },
+        .{ .text = "https://GitHub.com/rickyhugo/huen-wm.git/", .host = "github.com", .path = "rickyhugo/huen-wm", .url = "https://GitHub.com/rickyhugo/huen-wm.git/" },
+        .{ .text = "git@github.com:rickyhugo/huen-wm.git", .host = "github.com", .path = "rickyhugo/huen-wm", .url = "git@github.com:rickyhugo/huen-wm.git" },
+        .{ .text = "ssh://git@gitlab.example.com:2222/group/sub/repo.git", .host = "gitlab.example.com", .path = "group/sub/repo", .url = "ssh://git@gitlab.example.com:2222/group/sub/repo.git" },
+        .{ .text = "https://user:token@codeberg.org/owner/repo", .host = "codeberg.org", .path = "owner/repo", .url = "https://user:token@codeberg.org/owner/repo" },
+        .{ .text = "codeberg.org/owner/repo", .host = "codeberg.org", .path = "owner/repo", .url = "https://codeberg.org/owner/repo" },
+    };
+    for (cases) |case| {
+        const parsed = try remote(a, case.text);
+        try std.testing.expectEqualStrings(case.host, parsed.host);
+        try std.testing.expectEqualStrings(case.path, parsed.path);
+        try std.testing.expectEqualStrings(case.url, parsed.url);
+    }
+}
+
+test "remotes without a host and path or with escaping segments are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "file:///tmp/repo",      "/tmp/repo",                    "../repo",                   "repo",
+        "https://github.com/",   "https://github.com/a/../../x", "git@github.com:~/repo.git", "https://[::1]/a/b",
+        "local/repo",            "https://github.com/a//b",      "https://github.com/.git",   "https://user@/owner/repo",
+        "ftp://example.com/a/b",
+    }) |text| {
+        try std.testing.expectError(error.UnsupportedRemote, remote(arena.allocator(), text));
+    }
+}
