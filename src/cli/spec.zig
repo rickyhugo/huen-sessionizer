@@ -53,32 +53,31 @@ pub const Spec = struct {
 };
 pub const help_option = Option{ .id = .help, .long = "help", .short = 'h', .kind = .flag, .about = "Print help" };
 pub const version_option = Option{ .id = .version, .long = "version", .short = 'V', .kind = .flag, .about = "Print version" };
-pub const config_options = [_]Option{
-    .{ .id = .paths, .long = "paths", .short = 'p', .value = "search paths", .kind = .strings, .about = "The paths to search through. Shell like expansions such as '~' are supported" },
-    .{ .id = .session, .long = "session", .short = 's', .value = "default session", .about = "The default session to switch to (if available) when killing another session" },
-    .{ .id = .excluded, .long = "excluded", .value = "excluded dirs", .kind = .strings, .about = "As many directory names as desired to not be searched over" },
-    .{ .id = .remove, .long = "remove", .value = "remove dir", .kind = .strings, .about = "As many directory names to be removed from exclusion list" },
-    .{ .id = .full_path, .long = "full-path", .value = "true | false", .kind = .boolean, .about = "Use the full path when displaying directories" },
-    .{ .id = .search_submodules, .long = "search-submodules", .value = "true | false", .kind = .boolean, .about = "Also show initialized submodules" },
-    .{ .id = .recursive_submodules, .long = "recursive-submodules", .value = "true | false", .kind = .boolean, .about = "Search submodules for submodules" },
-    .{ .id = .switch_filter_unknown, .long = "switch-filter-unknown", .value = "true | false", .kind = .boolean, .about = "Only include sessions from search paths in the switcher" },
-    .{ .id = .max_depths, .long = "max-depths", .short = 'd', .value = "max depth", .kind = .uints, .about = "The maximum depth to traverse when searching for repositories in search paths, length should match the number of search paths if specified (defaults to 10)" },
-    .{ .id = .picker_highlight_color, .long = "picker-highlight-color", .value = "#rrggbb", .kind = .color, .about = "Background color of the highlighted item in the picker" },
-    .{ .id = .picker_highlight_text_color, .long = "picker-highlight-text-color", .value = "#rrggbb", .kind = .color, .about = "Text color of the highlighted item in the picker" },
-    .{ .id = .picker_border_color, .long = "picker-border-color", .value = "#rrggbb", .kind = .color, .about = "Color of the borders between widgets in the picker" },
-    .{ .id = .picker_info_color, .long = "picker-info-color", .value = "#rrggbb", .kind = .color, .about = "Color of the item count in the picker" },
-    .{ .id = .picker_prompt_color, .long = "picker-prompt-color", .value = "#rrggbb", .kind = .color, .about = "Color of the prompt in the picker" },
-    .{ .id = .session_sort_order, .long = "session-sort-order", .value = "Alphabetical | LastAttached", .kind = .order, .about = "Set the sort order of the sessions in the switch command" },
-    .{ .id = .clone_repo_switch, .long = "clone-repo-switch", .value = "Always | Never | Foreground", .kind = .clone_switch, .about = "Whether to automatically switch to the new session after the `clone-repo` command finishes\n" ++
-        "`Always` will always switch tmux to the new session\n" ++
-        "`Never` will always create the new session in the background\n" ++
-        "When set to `Foreground`, the new session will only be opened in the background if the active\n" ++
-        "tmux session has changed since starting the clone process (for long clone processes on larger repos)" },
-    .{ .id = .enable_list_worktrees, .long = "enable-list-worktrees", .value = "true | false", .kind = .boolean, .about = "Enable listing of woktrees for bare repositories" },
-};
 pub const specs = [_]Spec{
     .{ .id = .root, .parent = null, .name = "", .about = "Scan for all git folders in specified directories, select one and open it as a new tmux session", .suffix = " [COMMAND]" },
-    .{ .id = .config, .parent = .root, .name = "config", .about = "Configure the defaults for search paths and excluded directories", .suffix = " [OPTIONS]", .options = &config_options },
+    .{ .id = .config, .parent = .root, .name = "config", .about = "Configure the defaults for search paths and excluded directories", .suffix = " [OPTIONS]", .options = &.{
+        .{ .id = .paths, .long = "paths", .short = 'p', .value = "search paths", .kind = .strings, .about = "The paths to search through. Shell like expansions such as '~' are supported" },
+        .{ .id = .session, .long = "session", .short = 's', .value = "default session", .about = "The default session to switch to (if available) when killing another session" },
+        .{ .id = .excluded, .long = "excluded", .value = "excluded dirs", .kind = .strings, .about = "As many directory names as desired to not be searched over" },
+        .{ .id = .remove, .long = "remove", .value = "remove dir", .kind = .strings, .about = "As many directory names to be removed from exclusion list" },
+        .{ .id = .full_path, .long = "full-path", .value = "true | false", .kind = .boolean, .about = "Use the full path when displaying directories" },
+        .{ .id = .search_submodules, .long = "search-submodules", .value = "true | false", .kind = .boolean, .about = "Also show initialized submodules" },
+        .{ .id = .recursive_submodules, .long = "recursive-submodules", .value = "true | false", .kind = .boolean, .about = "Search submodules for submodules" },
+        .{ .id = .switch_filter_unknown, .long = "switch-filter-unknown", .value = "true | false", .kind = .boolean, .about = "Only include sessions from search paths in the switcher" },
+        .{ .id = .max_depths, .long = "max-depths", .short = 'd', .value = "max depth", .kind = .uints, .about = "The maximum depth to traverse when searching for repositories in search paths, length should match the number of search paths if specified (defaults to 10)" },
+        .{ .id = .picker_highlight_color, .long = "picker-highlight-color", .value = "#rrggbb", .kind = .color, .about = "Background color of the highlighted item in the picker" },
+        .{ .id = .picker_highlight_text_color, .long = "picker-highlight-text-color", .value = "#rrggbb", .kind = .color, .about = "Text color of the highlighted item in the picker" },
+        .{ .id = .picker_border_color, .long = "picker-border-color", .value = "#rrggbb", .kind = .color, .about = "Color of the borders between widgets in the picker" },
+        .{ .id = .picker_info_color, .long = "picker-info-color", .value = "#rrggbb", .kind = .color, .about = "Color of the item count in the picker" },
+        .{ .id = .picker_prompt_color, .long = "picker-prompt-color", .value = "#rrggbb", .kind = .color, .about = "Color of the prompt in the picker" },
+        .{ .id = .session_sort_order, .long = "session-sort-order", .value = "Alphabetical | LastAttached", .kind = .order, .about = "Set the sort order of the sessions in the switch command" },
+        .{ .id = .clone_repo_switch, .long = "clone-repo-switch", .value = "Always | Never | Foreground", .kind = .clone_switch, .about = "Whether to automatically switch to the new session after the `clone-repo` command finishes\n" ++
+            "`Always` will always switch tmux to the new session\n" ++
+            "`Never` will always create the new session in the background\n" ++
+            "When set to `Foreground`, the new session will only be opened in the background if the active\n" ++
+            "tmux session has changed since starting the clone process (for long clone processes on larger repos)" },
+        .{ .id = .enable_list_worktrees, .long = "enable-list-worktrees", .value = "true | false", .kind = .boolean, .about = "Enable listing of woktrees for bare repositories" },
+    } },
     .{ .id = .config_list, .parent = .config, .name = "list", .about = "List current config including all default values", .suffix = " [OPTIONS]", .options = &.{.{ .id = .defaults, .long = "defaults", .short = 'd', .kind = .flag, .about = "List only defaults without user set values" }} },
     .{ .id = .start, .parent = .root, .name = "start", .about = "Initialize tmux with the default sessions" },
     .{ .id = .switch_session, .parent = .root, .name = "switch", .about = "Display other sessions with a fuzzy finder and a preview window" },
@@ -131,19 +130,21 @@ fn matches(o: Option, name: OptionName) bool {
     };
 }
 
+pub fn allOptions(a: std.mem.Allocator, id: Id) ![]const Option {
+    return std.mem.concat(a, Option, &.{ get(id).options, if (id == .root) &.{ help_option, version_option } else &.{help_option} });
+}
+
 pub fn path(a: std.mem.Allocator, id: Id) ![]const []const u8 {
     const s = get(id);
-    if (s.parent == null) return &.{};
-    return std.mem.concat(a, []const u8, &.{ try path(a, s.parent.?), &.{s.name} });
+    const parent = s.parent orelse return &.{};
+    return std.mem.concat(a, []const u8, &.{ try path(a, parent), &.{s.name} });
 }
 pub fn invocation(a: std.mem.Allocator, id: Id) ![]const u8 {
-    const pieces = try path(a, id);
-    return std.mem.join(a, " ", try std.mem.concat(a, []const u8, &.{ &.{"tms"}, pieces }));
+    return std.mem.join(a, " ", try std.mem.concat(a, []const u8, &.{ &.{"tms"}, try path(a, id) }));
 }
 pub fn usage(a: std.mem.Allocator, id: Id) ![]const u8 {
-    const s = get(id);
     const base = try invocation(a, id);
-    return std.fmt.allocPrint(a, "{s}{s}{s}", .{ base, s.suffix, if (id == .config or id == .marks) try std.fmt.allocPrint(a, "\n       {s} <COMMAND>", .{base}) else "" });
+    return std.fmt.allocPrint(a, "{s}{s}{s}", .{ base, get(id).suffix, if (id == .config or id == .marks) try std.fmt.allocPrint(a, "\n       {s} <COMMAND>", .{base}) else "" });
 }
 pub fn label(a: std.mem.Allocator, option: Option) ![]const u8 {
     return std.fmt.allocPrint(a, "--{s}{s}", .{ option.long, if (option.value) |v| try std.fmt.allocPrint(a, " <{s}>{s}", .{ v, if (option.many()) "..." else "" }) else "" });
@@ -152,15 +153,6 @@ pub fn positionalUsage(a: std.mem.Allocator, id: Id) ![]const u8 {
     const s = get(id);
     if (id == .marks_delete) return s.suffix;
     return if (s.positional) |name| std.fmt.allocPrint(a, " {s}{s}{s}", .{ if (s.required) "<" else "[", name, if (s.required) ">" else "]" }) else "";
-}
-
-pub fn argumentGroup(a: std.mem.Allocator, id: Id) ![]const u8 {
-    const s = get(id);
-    var members: std.ArrayList([]const u8) = .empty;
-    if (!s.positional_last) if (s.positional) |name| try members.append(a, name);
-    for (s.options) |o| try members.append(a, try label(a, o));
-    if (s.positional_last) if (s.positional) |name| try members.append(a, name);
-    return std.fmt.allocPrint(a, "<{s}>", .{try std.mem.join(a, "|", members.items)});
 }
 
 pub fn values(kind: Kind) []const []const u8 {
@@ -183,46 +175,31 @@ pub fn help(a: std.mem.Allocator, id: Id) ![]const u8 {
     }
     if (id == .root or id == .config or id == .marks) {
         try w.writeAll("\nCommands:\n");
-        var width: usize = 4;
+        var width: usize = 0;
         for (specs) |entry| if (entry.parent == id) {
             width = @max(width, entry.name.len);
         };
-        for (specs) |entry| if (entry.parent == id and !isHelp(entry.id)) {
+        for (specs) |entry| if (entry.parent == id) {
             try w.print("  {s}", .{entry.name});
             try w.splatByteAll(' ', width + 2 - entry.name.len);
             try w.print("{s}\n", .{entry.about});
         };
-        try w.writeAll("  help");
-        try w.splatByteAll(' ', width - 2);
-        try w.writeAll("Print this message or the help of the given subcommand(s)\n");
     }
-    if (s.positional) |name| {
-        const required = s.required;
-        try w.print("\nArguments:\n  {s}{s}{s}  {s}\n", .{ if (required) "<" else "[", name, if (required) ">" else "]", s.positional_about });
-    }
+    if (s.positional) |name| try w.print("\nArguments:\n  {s}{s}{s}  {s}\n", .{ if (s.required) "<" else "[", name, if (s.required) ">" else "]", s.positional_about });
     try w.writeAll("\nOptions:\n");
-    var options: std.ArrayList(Option) = .empty;
-    try options.appendSlice(a, s.options);
-    try options.append(a, help_option);
-    if (id == .root) try options.append(a, version_option);
+    const options = try allOptions(a, id);
     var width: usize = 0;
-    for (options.items) |option| width = @max(width, (try label(a, option)).len + 4);
-    for (options.items) |option| {
+    for (options) |option| width = @max(width, (try label(a, option)).len);
+    for (options) |option| {
         const text = try label(a, option);
         try w.writeAll("  ");
         if (option.short) |ch| try w.print("-{c}, ", .{ch}) else try w.writeAll("    ");
         try w.writeAll(text);
         if (id == .config) {
-            try w.writeAll("\n          ");
             var lines = std.mem.splitScalar(u8, option.about, '\n');
-            var first = true;
-            while (lines.next()) |line| {
-                if (!first) try w.writeAll("\n          ");
-                first = false;
-                try w.writeAll(line);
-            }
+            while (lines.next()) |line| try w.print("\n          {s}", .{line});
         } else {
-            try w.splatByteAll(' ', width + 2 - text.len - 4);
+            try w.splatByteAll(' ', width + 2 - text.len);
             try w.writeAll(option.about);
         }
         const possible = values(option.kind);
