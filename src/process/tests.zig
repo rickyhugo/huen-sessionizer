@@ -22,7 +22,6 @@ fn childHelper() !void {
     if (std.mem.eql(u8, mode, "term-cancel")) try checkCaptureCancellation(path, .capture, true);
     if (std.mem.eql(u8, mode, "term-wait")) try checkCaptureCancellation(path, .capture_wait, true);
     if (std.mem.eql(u8, mode, "term-inherit")) try checkCaptureCancellation(path, .inherit, true);
-    if (std.mem.startsWith(u8, mode, "quota-")) try checkReplacementSetupFailure(mode);
     const ignored = std.mem.endsWith(u8, mode, "ignore");
     const request: process.Request = .{
         .argv = &.{
@@ -36,10 +35,12 @@ fn childHelper() !void {
         .env = &env,
         .stdin = if (ignored) .ignore else .inherit,
     };
-    if (std.mem.startsWith(u8, mode, "failed")) {
+    if (std.mem.startsWith(u8, mode, "failed") or std.mem.startsWith(u8, mode, "quota-")) {
         const before = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", a);
         defer a.free(before);
-        const closed = std.mem.eql(u8, mode, "failed-closed");
+        const closed = std.mem.eql(u8, mode, "failed-closed") or
+            std.mem.eql(u8, mode, "quota-closed-null-open") or
+            std.mem.eql(u8, mode, "quota-cwd-open");
         const flags = std.c.fcntl(0, std.posix.F.GETFD);
         try t.expect(flags >= 0);
         const saved = std.c.fcntl(0, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 3));
@@ -50,11 +51,20 @@ fn childHelper() !void {
         } else {
             try t.expectEqual(@as(c_int, 0), std.c.fcntl(0, std.posix.F.SETFD, flags | std.posix.FD_CLOEXEC));
         }
-        var missing = request;
-        missing.argv = &.{"/does-not-exist/tms-test"};
-        missing.stdin = .ignore;
-        if (std.mem.eql(u8, mode, "failed-cwd")) missing.cwd = "/does-not-exist/tms-cwd";
-        try t.expectError(error.FileNotFound, process.replace(io, missing));
+        if (std.mem.startsWith(u8, mode, "quota-")) {
+            const expected = if (std.mem.eql(u8, mode, "quota-duplicate"))
+                error.DuplicateStdinFailed
+            else
+                error.ProcessFdQuotaExceeded;
+            try t.expectError(expected, replaceAtFdLimit(mode));
+        } else {
+            try t.expectError(error.FileNotFound, process.replace(io, .{
+                .argv = &.{"/does-not-exist/tms-test"},
+                .cwd = if (std.mem.eql(u8, mode, "failed-cwd")) "/does-not-exist/tms-cwd" else path,
+                .env = &env,
+                .stdin = .ignore,
+            }));
+        }
         if (closed) {
             try t.expectEqual(@as(c_int, -1), std.c.fcntl(0, std.posix.F.GETFD));
             try t.expectEqual(std.c.E.BADF, std.c.errno(@as(c_int, -1)));
@@ -378,39 +388,6 @@ test "replace restores stdin after descriptor setup failures in isolated childre
     try checkHelper("quota-null-open", false);
     try checkHelper("quota-closed-null-open", false);
     try checkHelper("quota-cwd-open", false);
-}
-
-fn checkReplacementSetupFailure(mode: []const u8) !void {
-    const before = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", a);
-    defer a.free(before);
-    const flags = std.c.fcntl(0, std.posix.F.GETFD);
-    try t.expect(flags >= 0);
-    const saved = std.c.fcntl(0, std.posix.F.DUPFD_CLOEXEC, @as(c_int, 3));
-    try t.expect(saved >= 0);
-    defer _ = std.c.close(saved);
-    const closed = std.mem.eql(u8, mode, "quota-closed-null-open") or
-        std.mem.eql(u8, mode, "quota-cwd-open");
-    if (closed) {
-        try t.expectEqual(@as(c_int, 0), std.c.close(0));
-    } else {
-        try t.expectEqual(@as(c_int, 0), std.c.fcntl(0, std.posix.F.SETFD, flags | std.posix.FD_CLOEXEC));
-    }
-    const expected = if (std.mem.eql(u8, mode, "quota-duplicate"))
-        error.DuplicateStdinFailed
-    else
-        error.ProcessFdQuotaExceeded;
-    try t.expectError(expected, replaceAtFdLimit(mode));
-    if (closed) {
-        try t.expectEqual(@as(c_int, -1), std.c.fcntl(0, std.posix.F.GETFD));
-        try t.expectEqual(std.c.E.BADF, std.c.errno(@as(c_int, -1)));
-        try std.Io.Threaded.dup2(saved, 0);
-    } else {
-        try t.expectEqual(flags | std.posix.FD_CLOEXEC, std.c.fcntl(0, std.posix.F.GETFD));
-    }
-    try t.expectEqual(@as(c_int, 0), std.c.fcntl(0, std.posix.F.SETFD, flags));
-    const after = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", a);
-    defer a.free(after);
-    try t.expectEqualStrings(before, after);
 }
 
 fn replaceAtFdLimit(mode: []const u8) !void {

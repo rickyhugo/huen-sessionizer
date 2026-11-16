@@ -68,22 +68,18 @@ const Acl = struct {
         }
     }
 
-    fn blocksInheritance(self: Acl) !bool {
-        const value = self.value orelse return false;
-        var flags: ?*anyopaque = null;
-        if (native.acl_get_flagset_np(value, &flags) != 0) return error.ReadAclFailed;
-        return native.acl_get_flag_np(flags.?, no_inherit) == 1;
-    }
-
-    fn inherit(parent: Acl, directory: bool) !Acl {
+    fn inherit(parent: Acl, source: Acl, directory: bool) !Acl {
         var result: Acl = .{};
         errdefer result.deinit();
+        var flags: ?*anyopaque = null;
+        if (source.value) |value| {
+            if (native.acl_get_flagset_np(value, &flags) != 0) return error.ReadAclFailed;
+            if (native.acl_get_flag_np(flags.?, no_inherit) == 1) return result;
+        }
         const value = parent.value orelse return result;
         var entry: ?*anyopaque = null;
         var next: c_int = 0;
-        while (native.acl_get_entry(value, next, &entry) == 0) {
-            next = -1;
-            var flags: ?*anyopaque = null;
+        while (native.acl_get_entry(value, next, &entry) == 0) : (next = -1) {
             if (native.acl_get_flagset_np(entry.?, &flags) != 0) return error.ReadAclFailed;
             if (native.acl_get_flag_np(flags.?, if (directory) directory_inherit else file_inherit) != 1)
                 continue;
@@ -107,22 +103,6 @@ const Acl = struct {
         if (native.acl_create_entry(&self.value, &copied) != 0 or native.acl_copy_entry(copied.?, entry) != 0)
             return error.PreserveAclFailed;
         return copied.?;
-    }
-
-    fn append(self: *Acl, other: Acl) !void {
-        const value = other.value orelse return;
-        var entry: ?*anyopaque = null;
-        var next: c_int = 0;
-        while (native.acl_get_entry(value, next, &entry) == 0) {
-            next = -1;
-            _ = try self.appendEntry(entry.?);
-        }
-    }
-
-    fn apply(self: Acl, path: [:0]const u8) !void {
-        const value = self.value orelse return;
-        if (native.acl_set_link_np(path, native.ACL_TYPE_EXTENDED, value) != 0)
-            return error.PreserveAclFailed;
     }
 };
 
@@ -189,10 +169,6 @@ pub const CopyContext = struct {
 
     const Inode = struct { device: u64, inode: u64 };
 
-    pub fn init(a: std.mem.Allocator) CopyContext {
-        return .{ .arena = .init(a) };
-    }
-
     pub fn deinit(self: *CopyContext) void {
         for (self.pending.items) |metadata| metadata.acl.deinit();
         self.arena.deinit();
@@ -237,7 +213,8 @@ pub const CopyContext = struct {
         const stat = try Metadata.read(source);
         const kind = stat.mode & c.S.IFMT;
         const inode: Inode = .{ .device = stat.device, .inode = stat.inode };
-        if (kind != c.S.IFDIR and stat.nlink > 1) {
+        const linked = kind != c.S.IFDIR and stat.nlink > 1;
+        if (linked) {
             if (self.hardlinks.get(inode)) |previous| {
                 if (c.linkat(c.AT.FDCWD, previous, c.AT.FDCWD, destination, 0) != 0)
                     return error.HardlinkFailed;
@@ -246,10 +223,7 @@ pub const CopyContext = struct {
         }
         var source_acl: Acl = if (darwin) try .read(source) else .{};
         defer source_acl.deinit();
-        const inherited_acl: Acl = if (darwin and kind != c.S.IFLNK and !try source_acl.blocksInheritance())
-            try .inherit(parent_acl, kind == c.S.IFDIR)
-        else
-            .{};
+        const inherited_acl: Acl = if (darwin and kind != c.S.IFLNK) try .inherit(parent_acl, source_acl, kind == c.S.IFDIR) else .{};
         defer inherited_acl.deinit();
 
         switch (kind) {
@@ -278,19 +252,19 @@ pub const CopyContext = struct {
                     while (true) {
                         const count = c.read(input, &buffer, buffer.len);
                         if (count < 0) {
-                            if (std.c.errno(count) == .INTR) continue;
+                            if (c.errno(count) == .INTR) continue;
                             return error.ReadFailed;
                         }
                         if (count == 0) break;
-                        var written: usize = 0;
-                        while (written < count) {
-                            const size = c.write(output, buffer[written..].ptr, @as(usize, @intCast(count)) - written);
+                        var rest = buffer[0..@intCast(count)];
+                        while (rest.len > 0) {
+                            const size = c.write(output, rest.ptr, rest.len);
                             if (size < 0) {
-                                if (std.c.errno(size) == .INTR) continue;
+                                if (c.errno(size) == .INTR) continue;
                                 return error.WriteFailed;
                             }
                             if (size == 0) return error.WriteFailed;
-                            written += @intCast(size);
+                            rest = rest[@intCast(size)..];
                         }
                     }
                 }
@@ -312,7 +286,12 @@ pub const CopyContext = struct {
                 try self.copyXattrs(source, destination);
             } else if (kind != c.S.IFREG and native.copyfile(source, destination, null, native.COPYFILE_XATTR | native.COPYFILE_NOFOLLOW) != 0)
                 return error.PreserveMetadataFailed;
-            try source_acl.append(inherited_acl);
+            if (inherited_acl.value) |value| {
+                var entry: ?*anyopaque = null;
+                var next: c_int = 0;
+                while (native.acl_get_entry(value, next, &entry) == 0) : (next = -1)
+                    _ = try source_acl.appendEntry(entry.?);
+            }
             try self.pending.append(a, .{ .destination = destination, .stat = stat, .acl = source_acl });
             source_acl = .{};
         } else {
@@ -321,15 +300,14 @@ pub const CopyContext = struct {
             try self.copyXattrs(source, destination);
             try (FinalMetadata{ .destination = destination, .stat = stat }).apply();
         }
-        if (kind != c.S.IFDIR and stat.nlink > 1)
-            try self.hardlinks.put(a, inode, destination);
+        if (linked) try self.hardlinks.put(a, inode, destination);
     }
 
     fn copyXattrs(self: *CopyContext, from: [:0]const u8, to: [:0]const u8) !void {
         const a = self.arena.allocator();
         const size = if (darwin) native.listxattr(from, null, 0, native.XATTR_NOFOLLOW) else native.llistxattr(from, null, 0);
         if (size < 0) {
-            if (std.c.errno(size) == .OPNOTSUPP) return;
+            if (c.errno(size) == .OPNOTSUPP) return;
             return error.ListXattrsFailed;
         }
         const names = try a.alloc(u8, @intCast(size));
@@ -344,8 +322,7 @@ pub const CopyContext = struct {
             const read = if (darwin) native.getxattr(from, name, value.ptr, value.len, 0, native.XATTR_NOFOLLOW) else native.lgetxattr(from, name, value.ptr, value.len);
             if (read != length) return error.ReadXattrFailed;
             const result = if (darwin) native.setxattr(to, name, value.ptr, value.len, 0, native.XATTR_NOFOLLOW) else native.lsetxattr(to, name, value.ptr, value.len, 0);
-            if (result != 0)
-                return error.PreserveXattrFailed;
+            if (result != 0) return error.PreserveXattrFailed;
             start += name.len + 1;
         }
     }
@@ -361,7 +338,7 @@ const FinalMetadata = struct {
         const stat = self.stat;
         if (darwin and c.fchownat(c.AT.FDCWD, path, stat.uid, stat.gid, c.AT.SYMLINK_NOFOLLOW) != 0)
             return error.PreserveOwnershipFailed;
-        if (stat.mode & c.S.IFMT != c.S.IFLNK or darwin) {
+        if (darwin or stat.mode & c.S.IFMT != c.S.IFLNK) {
             if (c.fchmodat(c.AT.FDCWD, path, stat.mode & 0o7777, if (darwin) c.AT.SYMLINK_NOFOLLOW else 0) != 0)
                 return error.SetPermissionsFailed;
         }
@@ -373,7 +350,10 @@ const FinalMetadata = struct {
             // copyfile may preserve compression or fall back to uncompressed data.
             const flags = (stat.flags & ~(native.COPYFILE_OMIT_FLAGS | native.UF_COMPRESSED)) |
                 (current & (native.COPYFILE_PRESERVE_FLAGS | native.UF_COMPRESSED));
-            try self.acl.apply(path);
+            if (self.acl.value) |value| {
+                if (native.acl_set_link_np(path, native.ACL_TYPE_EXTENDED, value) != 0)
+                    return error.PreserveAclFailed;
+            }
             if (flags != current and native.lchflags(path, flags) != 0)
                 return error.PreserveFlagsFailed;
         }
