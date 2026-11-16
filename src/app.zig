@@ -51,7 +51,7 @@ const App = struct {
     fn kill(self: App) !void {
         const snapshot = try self.client.snapshot(self.io, self.a);
         const current = if (snapshot.current) |s| s.name else "";
-        const available = try unattached(self.a, snapshot, self.cfg.session_sort_order);
+        const available = try unattached(self.a, snapshot.sessions, self.cfg.session_sort_order);
         var target: ?[]const u8 = if (available.len > 0) available[0].name else null;
         if (self.cfg.default_session) |default| {
             if (!std.mem.eql(u8, default, current)) for (available) |entry| {
@@ -93,8 +93,7 @@ const App = struct {
     }
 
     fn newRepoSession(self: App, name: []const u8, target: []const u8) ![]const u8 {
-        const snapshot = try self.client.snapshot(self.io, self.a);
-        const session_name = for (snapshot.sessions) |entry| {
+        const session_name = for (try self.client.listSessions(self.io, self.a)) |entry| {
             if (!std.mem.eql(u8, entry.name, name)) continue;
             const parent = std.fs.path.basename(std.fs.path.dirname(target) orelse return error.InvalidRepositoryName);
             break try std.fmt.allocPrint(self.a, "{s}/{s}", .{ parent, name });
@@ -136,9 +135,9 @@ fn sessionListing(a: A, snapshot: tmux.Snapshot) ![]const u8 {
     return text.toOwnedSlice(a);
 }
 
-fn unattached(a: A, snapshot: tmux.Snapshot, order: ?config.Order) ![]const tmux.SessionInfo {
+fn unattached(a: A, list: []const tmux.SessionInfo, order: ?config.Order) ![]const tmux.SessionInfo {
     var result: std.ArrayList(tmux.SessionInfo) = .empty;
-    for (snapshot.sessions) |s| if (!s.attached) try result.append(a, s);
+    for (list) |s| if (!s.attached) try result.append(a, s);
     if (order == .last_attached) {
         std.mem.sort(tmux.SessionInfo, result.items, {}, struct {
             fn less(_: void, lhs: tmux.SessionInfo, rhs: tmux.SessionInfo) bool {
@@ -158,20 +157,25 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
         else => {},
     }
     var cfg = try config.load(io, a, env);
+    const socket = env.get("TMS_TMUX_SOCKET") orelse "default";
     const app: App = .{
         .io = io,
         .a = a,
         .scratch = scratch,
         .env = env,
         .cfg = &cfg,
-        .client = .{ .socket = env.get("TMS_TMUX_SOCKET") orelse "default", .inside_tmux = std.mem.eql(u8, env.get("TERM_PROGRAM") orelse "", "tmux") },
+        .client = .{
+            .socket = socket,
+            .inside_tmux = std.mem.eql(u8, env.get("TERM_PROGRAM") orelse "", "tmux"),
+            .executable = tmux.serverExecutable(io, a, env.get("TMUX"), socket) orelse "tmux",
+        },
     };
     const client = &app.client;
     switch (cmd) {
         .pick => {
             const catalog = try sessions.discover(io, a, env, &cfg);
             const order = cfg.session_sort_order orelse .alphabetical;
-            const snapshot: tmux.Snapshot = if (order == .last_attached) try client.snapshot(io, a) else .{ .sessions = &.{}, .current = null };
+            const snapshot: tmux.Snapshot = .{ .sessions = if (order == .last_attached) try client.listSessions(io, a) else &.{}, .current = null };
             const indices = try sessions.orderedIndices(a, catalog, snapshot, order);
             const items = try a.alloc(picker.Item, indices.len);
             for (indices, items) |index, *item| {
@@ -182,7 +186,7 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
         },
         .start => try app.start(),
         .switch_session => {
-            const available = try unattached(a, try client.snapshot(io, a), cfg.session_sort_order);
+            const available = try unattached(a, try client.listSessions(io, a), cfg.session_sort_order);
             const catalog: ?sessions.Catalog = if (cfg.switch_filter_unknown == true) try sessions.discover(io, a, env, &cfg) else null;
             var items: std.ArrayList(picker.Item) = .empty;
             for (available, 0..) |entry, i| {
@@ -298,11 +302,11 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
 test "switch and kill sort timestamp text rather than numbers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const entries = try unattached(arena.allocator(), .{ .current = null, .sessions = &.{
+    const entries = try unattached(arena.allocator(), &.{
         .{ .name = "ten", .attached = false, .last_attached = "10" },
         .{ .name = "nine", .attached = false, .last_attached = "9" },
         .{ .name = "current", .attached = true, .last_attached = "99" },
-    } }, .last_attached);
+    }, .last_attached);
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expectEqualStrings("nine", entries[0].name);
 }

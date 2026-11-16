@@ -41,7 +41,7 @@ def attributes(fd):
 
 
 class Picker:
-    def __init__(self, binary, saturated_entry=False, long_query=False):
+    def __init__(self, binary, saturated_entry=False, long_query=False, choosing=False):
         self.master, self.slave = pty.openpty()
         self.original = attributes(self.slave)
         self.resize(80)
@@ -73,6 +73,7 @@ class Picker:
                 str(self.errors.fileno()),
                 binary,
                 *(["long-query"] if long_query else []),
+                *(["select"] if choosing else []),
             ],
             stdin=self.slave,
             stdout=self.slave,
@@ -263,6 +264,18 @@ def layout(p, text):
     cancellation(p, b"\x03")
 
 
+def query_then_selection_key(p, keys, expected):
+    p.send(keys)
+    p.finish(expected)
+
+
+def query_then_unmatched_enter(p):
+    p.send(b"zzzz\r")
+    assert b"0/3" in ANSI.sub(b"", p.frame()), "flushed rerank did not redraw"
+    p.send(b"\x1b")
+    p.finish(3)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", help="Use an existing real-matcher driver")
@@ -304,6 +317,9 @@ def main():
             ("hebrew-layout", lambda p: layout(p, "\u05d0\u200d\u05dcx")),
             ("saturated-entry-suspend", suspend_entry),
             ("long-query-signal", long_query_signal),
+            ("query-then-enter", lambda p: query_then_selection_key(p, b"beta\r", 2)),
+            ("query-then-unmatched-enter", query_then_unmatched_enter),
+            ("query-then-move", lambda p: query_then_selection_key(p, b"b\x1b[B\x1b[B\r", 2)),
         ]
         if args.case is not None and args.case not in dict(tests):
             parser.error(f"unknown scenario: {args.case}")
@@ -315,6 +331,7 @@ def main():
                 binary,
                 saturated_entry=name == "saturated-entry-suspend",
                 long_query=name == "long-query-signal",
+                choosing=name.startswith("query-then-"),
             )
             try:
                 test(p)

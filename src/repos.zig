@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config");
+const parallel = @import("parallel");
 const process = @import("process");
 const parsers = @import("repos/parsers.zig");
 const A = std.mem.Allocator;
@@ -27,70 +28,85 @@ pub const WorkspaceSet = enum { active_other, registered };
 pub const Submodule = struct { name: []const u8, ref: RepoRef };
 
 pub fn discover(io: Io, a: A, search: Search) anyerror![]const RepoRef {
-    var queue: std.ArrayList(config.SearchDirectory) = .empty;
-    defer queue.deinit(a);
-    try queue.appendSlice(a, search.roots);
     var found: std.ArrayList(RepoRef) = .empty;
-    var next: usize = 0;
-    queue: while (next < queue.items.len) : (next += 1) {
-        const current = queue.items[next];
-        if (search.excluded) |patterns| {
-            if (!std.unicode.utf8ValidateSlice(current.path)) return error.NonUtf8Path;
-            for (patterns) |pattern| {
-                if (std.mem.indexOf(u8, current.path, pattern) != null) continue :queue;
-            }
-        }
-        if (try detect(io, current.path, search.providers)) |ref| {
-            if (!std.unicode.utf8ValidateSlice(std.fs.path.basename(current.path))) return error.NonUtf8Path;
-            try found.append(a, ref);
-            continue;
-        }
-        if (current.depth == 0) continue;
-        var dir = Io.Dir.cwd().openDir(io, current.path, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir, error.SymLinkLoop => continue,
-            error.AccessDenied => {
+    var level: []const config.SearchDirectory = search.roots;
+    // Visiting a whole breadth-first level at once keeps the sequential result order.
+    while (level.len > 0) {
+        const visits = try a.alloc(anyerror!Visit, level.len);
+        defer a.free(visits);
+        try parallel.map(io, visits, level, visit, .{ io, a, search });
+        var next: std.ArrayList(config.SearchDirectory) = .empty;
+        for (level, visits) |current, outcome| switch (try outcome) {
+            .skipped => {},
+            .repository => |ref| try found.append(a, ref),
+            .children => |children| try next.appendSlice(a, children),
+            .denied => {
                 if (!std.unicode.utf8ValidateSlice(current.path)) return error.NonUtf8Path;
                 var buffer: [1024]u8 = undefined;
                 var writer = Io.File.stderr().writer(io, &buffer);
                 try writer.interface.print("Warning: insufficient permissions to read '{s}'. Skipping directory...\n", .{current.path});
                 try writer.interface.flush();
-                continue;
             },
-            else => return err,
         };
-        defer dir.close(io);
-        var entries = dir.iterate();
-        while (try entries.next(io)) |entry| {
-            const path = try std.fs.path.join(a, &.{ current.path, entry.name });
-            try queue.append(a, .{ .path = path, .depth = current.depth - 1 });
-        }
+        level = try next.toOwnedSlice(a);
     }
     return found.toOwnedSlice(a);
 }
 
-pub fn detect(io: Io, path: []const u8, providers: []const Provider) anyerror!?RepoRef {
-    for (providers) |provider| {
-        var dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch continue;
-        defer dir.close(io);
-        switch (provider) {
-            .git => {
-                var flags: u3 = 0;
-                var entries = dir.iterate();
-                while (entries.next(io) catch null) |entry| {
-                    if (std.mem.eql(u8, entry.name, ".git")) return .{ .path = path, .provider = provider };
-                    if (std.mem.eql(u8, entry.name, "HEAD") and entry.kind == .file) flags |= 1;
-                    if (std.mem.eql(u8, entry.name, "objects") and entry.kind == .directory) flags |= 2;
-                    if (std.mem.eql(u8, entry.name, "refs") and entry.kind == .directory) flags |= 4;
-                    if (flags == 7) return .{ .path = path, .provider = provider };
-                }
-            },
-            .jujutsu => {
-                dir.access(io, ".jj/repo", .{}) catch continue;
-                return .{ .path = path, .provider = provider };
-            },
+const Visit = union(enum) {
+    skipped,
+    repository: RepoRef,
+    children: []const config.SearchDirectory,
+    denied,
+};
+
+fn visit(io: Io, a: A, search: Search, current: config.SearchDirectory) anyerror!Visit {
+    if (search.excluded) |patterns| {
+        if (!std.unicode.utf8ValidateSlice(current.path)) return error.NonUtf8Path;
+        for (patterns) |pattern| {
+            if (std.mem.indexOf(u8, current.path, pattern) != null) return .skipped;
         }
     }
+    if (try detect(io, current.path, search.providers)) |ref| {
+        if (!std.unicode.utf8ValidateSlice(std.fs.path.basename(current.path))) return error.NonUtf8Path;
+        return .{ .repository = ref };
+    }
+    if (current.depth == 0) return .skipped;
+    var dir = Io.Dir.cwd().openDir(io, current.path, .{ .iterate = true }) catch |err| return switch (err) {
+        error.FileNotFound, error.NotDir, error.SymLinkLoop => .skipped,
+        error.AccessDenied => .denied,
+        else => err,
+    };
+    defer dir.close(io);
+    var children: std.ArrayList(config.SearchDirectory) = .empty;
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| {
+        const path = try std.fs.path.join(a, &.{ current.path, entry.name });
+        try children.append(a, .{ .path = path, .depth = current.depth - 1 });
+    }
+    return .{ .children = children.items };
+}
+
+pub fn detect(io: Io, path: []const u8, providers: []const Provider) anyerror!?RepoRef {
+    // Stat probes, unlike opening each candidate, avoid the directory close that dominates discovery on macOS.
+    for (providers) |provider| {
+        const found = switch (provider) {
+            .git => entryKind(io, path, ".git", false) != null or
+                (entryKind(io, path, "HEAD", false) == .file and
+                    entryKind(io, path, "objects", false) == .directory and
+                    entryKind(io, path, "refs", false) == .directory),
+            .jujutsu => entryKind(io, path, ".jj/repo", true) != null,
+        };
+        if (found) return .{ .path = path, .provider = provider };
+    }
     return null;
+}
+
+fn entryKind(io: Io, dir: []const u8, name: []const u8, follow_symlinks: bool) ?Io.File.Kind {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ dir, name }) catch return null;
+    const stat = Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = follow_symlinks }) catch return null;
+    return stat.kind;
 }
 
 pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
@@ -191,9 +207,8 @@ fn gitBare(io: Io, a: A, ref: RepoRef) !bool {
     else
         metadata;
     for ([_][]const u8{ "objects", "refs" }) |part| {
-        const path = try std.fs.path.join(a, &.{ common, part });
-        var dir = try Io.Dir.cwd().openDir(io, path, .{});
-        dir.close(io);
+        const stat = try Io.Dir.cwd().statFile(io, try std.fs.path.join(a, &.{ common, part }), .{});
+        if (stat.kind != .directory) return error.NotDir;
     }
     if (!isFile(io, try std.fs.path.join(a, &.{ metadata, "HEAD" }))) return error.GitError;
     const path = try std.fs.path.join(a, &.{ common, "config" });

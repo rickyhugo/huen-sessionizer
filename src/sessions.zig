@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config");
+const parallel = @import("parallel");
 const repos = @import("repos");
 const tmux = @import("tmux");
 const A = std.mem.Allocator;
@@ -29,32 +30,48 @@ pub fn discover(io: Io, a: A, env: *const Env, cfg: *const config.Config) anyerr
     const roots = try config.searchRoots(io, a, env, cfg);
     const providers: []const repos.Provider = cfg.vcs_providers orelse &.{.git};
     const found = try repos.discover(io, a, .{ .roots = roots, .excluded = cfg.excluded_dirs, .providers = providers });
+    const trees = try a.alloc(anyerror![]const Session, found.len);
+    if (cfg.list_worktrees == true) {
+        try parallel.map(io, trees, found, worktreeEntries, .{ io, a, env, providers });
+    } else @memset(trees, &.{});
     var list: std.ArrayList(Session) = .empty;
-    for (found) |ref| {
-        const name = std.fs.path.basename(ref.path);
-        if (cfg.list_worktrees == true and try repos.isBare(io, a, env, ref)) {
-            for (try repos.worktrees(io, a, ref, .registered)) |tree| {
-                const tree_ref = (repos.detect(io, tree.path, providers) catch null) orelse continue;
-                try list.append(a, entryFor(tree_ref, try std.fmt.allocPrint(a, "{s}#{s}", .{ name, tree.name })));
-            }
-        }
-        try list.append(a, entryFor(ref, name));
+    for (found, trees) |ref, entries| {
+        try list.appendSlice(a, try entries);
+        try list.append(a, entryFor(ref, std.fs.path.basename(ref.path)));
     }
     for (try config.bookmarkPaths(io, a, env, cfg)) |p| {
         const name = std.fs.path.basename(p);
         try list.append(a, .{ .key = name, .name = name, .source = .{ .bookmark = p } });
     }
     try deduplicate(a, list.items);
+    for (list.items) |*entry| entry.key = if (cfg.display_full_path == true) sourcePath(entry.*) else entry.name;
+    const modules = try a.alloc(anyerror![]const Session, list.items.len);
+    if (cfg.search_submodules == true) {
+        try parallel.map(io, modules, list.items, submoduleEntries, .{ io, a, cfg });
+    } else @memset(modules, &.{});
     var expanded: std.ArrayList(Session) = .empty;
-    for (list.items) |entry| {
-        var visible = entry;
-        visible.key = if (cfg.display_full_path == true) sourcePath(entry) else entry.name;
-        if (entry.source == .repository and entry.source.repository.provider == .git and cfg.search_submodules == true) {
-            try appendSubmodules(io, a, &expanded, entry.source.repository, visible.key, cfg);
-        }
-        try expanded.append(a, visible);
+    for (list.items, modules) |entry, children| {
+        try expanded.appendSlice(a, try children);
+        try expanded.append(a, entry);
     }
     return catalog(a, expanded.items);
+}
+
+fn worktreeEntries(io: Io, a: A, env: *const Env, providers: []const repos.Provider, ref: repos.RepoRef) anyerror![]const Session {
+    if (!try repos.isBare(io, a, env, ref)) return &.{};
+    var entries: std.ArrayList(Session) = .empty;
+    for (try repos.worktrees(io, a, ref, .registered)) |tree| {
+        const tree_ref = (repos.detect(io, tree.path, providers) catch null) orelse continue;
+        try entries.append(a, entryFor(tree_ref, try std.fmt.allocPrint(a, "{s}#{s}", .{ std.fs.path.basename(ref.path), tree.name })));
+    }
+    return entries.items;
+}
+
+fn submoduleEntries(io: Io, a: A, cfg: *const config.Config, entry: Session) anyerror![]const Session {
+    if (entry.source != .repository or entry.source.repository.provider != .git) return &.{};
+    var entries: std.ArrayList(Session) = .empty;
+    try appendSubmodules(io, a, &entries, entry.source.repository, entry.key, cfg);
+    return entries.items;
 }
 
 fn appendSubmodules(io: Io, a: A, list: *std.ArrayList(Session), ref: repos.RepoRef, parent: []const u8, cfg: *const config.Config) !void {
@@ -85,19 +102,17 @@ fn componentFromEnd(p: []const u8, depth: usize) ?[]const u8 {
 }
 
 fn deduplicate(a: A, entries: []Session) !void {
-    const visited = try a.alloc(bool, entries.len);
-    defer a.free(visited);
-    @memset(visited, false);
+    var groups: std.StringArrayHashMapUnmanaged(std.ArrayList(usize)) = .empty;
+    defer {
+        for (groups.values()) |*group| group.deinit(a);
+        groups.deinit(a);
+    }
     for (entries, 0..) |entry, i| {
-        if (visited[i]) continue;
-        var group: std.ArrayList(usize) = .empty;
-        defer group.deinit(a);
-        for (entries[i..], i..) |other, j| {
-            if (!visited[j] and std.mem.eql(u8, entry.name, other.name)) {
-                visited[j] = true;
-                try group.append(a, j);
-            }
-        }
+        const slot = try groups.getOrPut(a, entry.name);
+        if (!slot.found_existing) slot.value_ptr.* = .empty;
+        try slot.value_ptr.append(a, i);
+    }
+    for (groups.values()) |group| {
         if (group.items.len < 2) continue;
         var depth: usize = 1;
         for (group.items, 0..) |current, k| {
@@ -164,11 +179,13 @@ pub fn orderedIndices(a: A, entries: Catalog, snapshot: tmux.Snapshot, order: co
     const indices = try a.alloc(Index, entries.entries.len);
     for (indices, 0..) |*index, i| index.* = i;
     if (order == .last_attached) {
-        const Context = struct { catalog: Catalog, snapshot: tmux.Snapshot };
-        std.mem.sort(Index, indices, Context{ .catalog = entries, .snapshot = snapshot }, struct {
-            fn less(ctx: Context, lhs: Index, rhs: Index) bool {
-                const l = activeTimestamp(ctx.catalog.entries[lhs].key, ctx.snapshot);
-                const r = activeTimestamp(ctx.catalog.entries[rhs].key, ctx.snapshot);
+        const stamps = try a.alloc(?i64, indices.len);
+        defer a.free(stamps);
+        for (stamps, entries.entries) |*stamp, entry| stamp.* = activeTimestamp(entry.key, snapshot);
+        std.mem.sort(Index, indices, stamps, struct {
+            fn less(ctx: []const ?i64, lhs: Index, rhs: Index) bool {
+                const l = ctx[lhs];
+                const r = ctx[rhs];
                 if (l != null and r == null) return true;
                 if (l == null and r != null) return false;
                 if (l != null and l.? != r.?) return l.? > r.?;
@@ -199,8 +216,7 @@ pub fn path(io: Io, a: A, entry: Session) anyerror![]const u8 {
 pub fn open(io: Io, a: A, entry: Session, client: *const tmux.Client, cfg: *const config.Config) anyerror!void {
     const cwd = try path(io, a, entry);
     const name = try std.mem.replaceOwned(u8, a, entry.name, ".", "_");
-    const snapshot = try client.snapshot(io, a);
-    for (snapshot.sessions) |s| {
+    for (try client.listSessions(io, a)) |s| {
         if (std.mem.eql(u8, s.name, name)) break;
     } else {
         _ = try client.newSession(io, a, name, cwd);
