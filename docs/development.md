@@ -100,3 +100,13 @@ and platform verification limits.
 The migration-only Rust comparison tools, goldens, and ranking oracle were
 removed after compatibility verification and successful native Nix builds on
 all four systems. See [verification checkpoint](compatibility.md) for evidence.
+
+## Versioning
+
+`tms` follows [Semantic Versioning](https://semver.org/). The version lives in
+`build.zig.zon`, and `tms --version` reports it. The project restarted at
+`0.1.0`. Earlier builds reported `0.6.1`, the upstream Rust version.
+
+Before 1.0.0, a minor bump marks a breaking change or a new feature, and a patch
+bump marks a fix. A release tag is `v` plus the version, such as `v0.1.0`.
+`mise run package:tag` rejects a tag that does not match `build.zig.zon`.
