@@ -79,7 +79,7 @@ class Screen:
                     col = (vals[1] or 1) if len(vals) > 1 else 1
                     if row > self.rows or col > self.cols:
                         self.invalid_positions.append([row, col])
-                    self.y = min(self.rows - 1, (vals[0] or 1) - 1)
+                    self.y = min(self.rows - 1, row - 1)
                     self.x = min(self.cols - 1, col - 1)
                 elif op == "A":
                     self.y = max(0, self.y - n)
@@ -154,16 +154,14 @@ class Screen:
                         b"\x1b[>0;136;0c" if args.startswith(">") else b"\x1b[?1;2c"
                     )
                 continue
-            if s.startswith("\x1b]") or s.startswith("\x1bP"):
+            if s.startswith(("\x1b]", "\x1bP")):
                 match = re.search(r"\x07|\x1b\\", s[2:])
                 if not match:
                     break
                 self.pending = s[2 + match.end() :]
                 continue
             if s[0] == "\x1b":
-                if len(s) < 2:
-                    break
-                size = 3 if s[1] in "()#%" else 2
+                size = 3 if len(s) > 1 and s[1] in "()#%" else 2
                 if len(s) < size:
                     break
                 self.pending = s[size:]
@@ -184,24 +182,19 @@ class Screen:
                 self.x = max(0, self.x - 1)
             elif c == "\t":
                 self.x = min(self.cols - 1, (self.x // 8 + 1) * 8)
+            elif ord(c) >= 32 and unicodedata.combining(c):
+                self.cells[self.y][max(0, self.x - 1)] += c
             elif ord(c) >= 32:
-                width = (
-                    0
-                    if unicodedata.combining(c)
-                    else (2 if unicodedata.east_asian_width(c) in ("W", "F") else 1)
-                )
-                if width == 0:
-                    self.cells[self.y][max(0, self.x - 1)] += c
-                else:
-                    if self.x >= self.cols:
-                        self.x = 0
-                        self.y = min(self.rows - 1, self.y + 1)
-                    self.cells[self.y][self.x] = c
-                    self.styles[self.y][self.x] = self.style
-                    if width == 2 and self.x + 1 < self.cols:
-                        self.cells[self.y][self.x + 1] = ""
-                        self.styles[self.y][self.x + 1] = self.style
-                    self.x += width
+                width = 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+                if self.x >= self.cols:
+                    self.x = 0
+                    self.y = min(self.rows - 1, self.y + 1)
+                self.cells[self.y][self.x] = c
+                self.styles[self.y][self.x] = self.style
+                if width == 2 and self.x + 1 < self.cols:
+                    self.cells[self.y][self.x + 1] = ""
+                    self.styles[self.y][self.x + 1] = self.style
+                self.x += width
         return replies
 
 
@@ -212,7 +205,9 @@ class Terminal:
         self.raw = bytearray()
         self.events = []
         self.started = time.perf_counter()
-        self.resize(rows, cols)
+        fcntl.ioctl(
+            self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
+        )
         self.before = self.attributes(termios.tcgetattr(self.slave))
         self.events.append(
             {"command": command, "terminal_before": self.before, "size": [rows, cols]}
@@ -263,7 +258,7 @@ sys.exit(code if code >= 0 else 128 - code)
             self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
         )
         self.screen.resize(rows, cols)
-        if hasattr(self, "process") and self.process.poll() is None:
+        if self.process.poll() is None:
             os.killpg(self.process.pid, signal.SIGWINCH)
 
     def read(self, timeout=0):
@@ -363,7 +358,7 @@ sys.exit(code if code >= 0 else 128 - code)
 
 
 class Fixture:
-    def __init__(self, count=0):
+    def __init__(self):
         preferred_temp = Path(tempfile.gettempdir()) / "opencode"
         self.temp = tempfile.TemporaryDirectory(
             prefix="tms-terminal-",
@@ -381,6 +376,7 @@ class Fixture:
         self.real_tmux = shutil.which("tmux")
         if self.real_tmux is None:
             raise RuntimeError("required tool not found: tmux")
+        self.tmux_command = [self.real_tmux, "-L", self.socket, "-f", os.devnull]
         launcher = tools / "tmux"
         launcher_source = Path(__file__).parents[1] / "tests" / "terminal"
         launcher.write_text(
@@ -425,18 +421,7 @@ class Fixture:
             SHELL="/bin/sh",
             PATH=str(tools),
         )
-        self.names = (
-            [f"project-{i:04d}" for i in range(count)]
-            if count
-            else [
-                "alpha",
-                "beta",
-                "café",
-                "wide-界",
-                "active.repo",
-            ]
-        )
-        for name in self.names:
+        for name in ("alpha", "beta", "café", "wide-界", "active.repo"):
             path = self.repos / name
             path.mkdir()
             subprocess.run(
@@ -456,7 +441,7 @@ class Fixture:
 
     def tmux(self, *args, check=True):
         return subprocess.run(
-            [self.real_tmux, "-L", self.socket, "-f", os.devnull, *args],
+            [*self.tmux_command, *args],
             env=self.env,
             cwd=self.home,
             capture_output=True,
@@ -464,9 +449,6 @@ class Fixture:
             check=check,
             timeout=8,
         )
-
-    def terminal(self, binary, args=(), **kwargs):
-        return Terminal([str(binary), *args], self.env, self.home, **kwargs)
 
     def close(self):
         self.tmux("kill-server", check=False)
@@ -508,17 +490,11 @@ def run_pty_checks(binary, output):
     def case(name, check, args=(), **size):
         terminal = None
         try:
-            terminal = fixture.terminal(binary, args, **size)
+            terminal = Terminal([str(binary), *args], fixture.env, fixture.home, **size)
             check(terminal)
             results.append({"name": name, "status": "PASS"})
         except (AssertionError, OSError) as error:
-            results.append(
-                {
-                    "name": name,
-                    "status": "FAIL",
-                    "detail": str(error),
-                }
-            )
+            results.append({"name": name, "status": "FAIL", "detail": str(error)})
         finally:
             if terminal:
                 terminal.save(output, name)
@@ -606,8 +582,7 @@ def run_pty_checks(binary, output):
         t.wait(ready, "picker ready")
         t.send("界".encode(), "insert wide scalar")
         t.wait(lambda s: "> 界" in s.text, "wide scalar visible")
-        if t.screen.x != 4:
-            raise AssertionError(f"wide scalar cursor column {t.screen.x}, expected 4")
+        assert t.screen.x == 4, f"wide scalar cursor column {t.screen.x}, expected 4"
 
     case("wide-cursor", wide_cursor)
 
@@ -633,10 +608,9 @@ def run_pty_checks(binary, output):
         t.screen.invalid_positions.clear()
         t.send(b"\x1b[D", "redraw tiny picker")
         t.wait(lambda s: len(t.raw) > offset, "tiny picker redraw")
-        if t.screen.invalid_positions:
-            raise AssertionError(
-                f"cursor outside tiny terminal {t.screen.invalid_positions}"
-            )
+        assert not t.screen.invalid_positions, (
+            f"cursor outside tiny terminal {t.screen.invalid_positions}"
+        )
         t.send(b"\x03", "cancel tiny picker")
         try:
             code = t.exit(expected=None)
@@ -644,10 +618,9 @@ def run_pty_checks(binary, output):
             raise AssertionError(
                 f"{error}; out-of-bounds cursor positions {t.screen.invalid_positions}"
             ) from error
-        if code != 0 or t.screen.invalid_positions:
-            raise AssertionError(
-                f"tiny picker exit {code}; cursor positions {t.screen.invalid_positions}"
-            )
+        assert code == 0 and not t.screen.invalid_positions, (
+            f"tiny picker exit {code}; cursor positions {t.screen.invalid_positions}"
+        )
         t.restored()
 
     case("tiny-terminal", tiny)
@@ -784,40 +757,18 @@ def run_popup_checks(binary, output):
     results = []
     client = None
     try:
-        fixture.tmux(
-            "new-session",
-            "-d",
-            "-s",
-            "origin",
-            "-x",
-            "100",
-            "-y",
-            "30",
-            "printf 'ORIGIN_READY\\n'; exec /bin/sh",
-        )
-        fixture.tmux("set-option", "-g", "status", "off")
-        fixture.tmux(
-            "new-session",
-            "-d",
-            "-s",
-            "preview",
-            "-x",
-            "100",
-            "-y",
-            "30",
-            "printf 'SESSION_PREVIEW_TOKEN\\n'; exec /bin/sh",
-        )
-        fixture.tmux(
-            "new-session",
-            "-d",
-            "-s",
-            "active_repo",
-            "-x",
-            "100",
-            "-y",
-            "30",
-            "printf 'ACTIVE_READY\\n'; exec /bin/sh",
-        )
+        for name, token in (
+            ("origin", "ORIGIN_READY"),
+            ("preview", "SESSION_PREVIEW_TOKEN"),
+            ("active_repo", "ACTIVE_READY"),
+        ):
+            shell = f"printf '{token}\\n'; exec /bin/sh"
+            fixture.tmux(
+                "new-session", "-d", "-s", name, "-x", "100", "-y", "30", shell
+            )
+            # The first session starts the server that the global option needs.
+            if name == "origin":
+                fixture.tmux("set-option", "-g", "status", "off")
         fixture.tmux(
             "new-window",
             "-d",
@@ -828,16 +779,7 @@ def run_popup_checks(binary, output):
             "printf 'WINDOW_PREVIEW_TOKEN\\n'; exec /bin/sh",
         )
         client = Terminal(
-            [
-                fixture.real_tmux,
-                "-L",
-                fixture.socket,
-                "-f",
-                os.devnull,
-                "attach-session",
-                "-t",
-                "origin",
-            ],
+            [*fixture.tmux_command, "attach-session", "-t", "origin"],
             fixture.env,
             fixture.home,
             rows=30,
@@ -878,11 +820,7 @@ def run_popup_checks(binary, output):
             command += " TERM_PROGRAM=tmux " + shlex.join([str(binary), *args])
             job = subprocess.Popen(
                 [
-                    fixture.real_tmux,
-                    "-L",
-                    fixture.socket,
-                    "-f",
-                    os.devnull,
+                    *fixture.tmux_command,
                     "display-popup",
                     "-c",
                     target,

@@ -49,8 +49,7 @@ def missing_value(option):
     return f"error: a value is required for '{option}' but none was supplied\n{MORE}"
 
 
-def unexpected_value(command, option, value, usage=None):
-    usage = usage or f"{command} --{option}"
+def unexpected_value(option, value, usage):
     return (
         f"error: unexpected value '{value}' for '--{option}' found; no more were expected\n\n"
         f"Usage: {usage}\n{MORE}"
@@ -94,11 +93,7 @@ CASES = [
     ([b"config", b"--paths", b"invalid-\xff"], invalid_utf8("config")),
     ([b"config", b"--paths=invalid-\xff"], invalid_utf8("config")),
     ([b"config", b"--excluded", b"valid", b"invalid-\xff"], invalid_utf8("config")),
-    (
-        [b"config", b"--full-path", b"\xff"],
-        "error: invalid value '�' for '--full-path <true | false>'\n"
-        f"  [possible values: true, false]\n{MORE}",
-    ),
+    ([b"config", b"--full-path", b"\xff"], invalid_boolean("�")),
     ([b"config", b"--max-depths", b"\xff"], invalid_utf8("config")),
     ([b"config", b"--picker-border-color", b"\xff"], invalid_utf8("config")),
     ([b"clone-repo", b"--name", b"\xff", b"url"], invalid_utf8("clone-repo")),
@@ -127,8 +122,14 @@ CASES = [
         )
         for command in ("list", "unknown")
     ],
-    (["config", "--session", "--help=x"], unexpected_value("tms config", "help", "x")),
-    (["config", "--paths", "--help="], unexpected_value("tms config", "help", "")),
+    (
+        ["config", "--session", "--help=x"],
+        unexpected_value("help", "x", "tms config --help"),
+    ),
+    (
+        ["config", "--paths", "--help="],
+        unexpected_value("help", "", "tms config --help"),
+    ),
     *[
         (["config", "--session", token], missing_value("--session <default session>"))
         for token in ("-hh", "-hx", "-h=x", "-ph", "--full-path=true")
@@ -180,7 +181,7 @@ CASES = [
     *[
         (
             [*command, "--help=x"],
-            unexpected_value("", "help", "x", usage=usage),
+            unexpected_value("help", "x", usage),
         )
         for command, usage in (
             (["marks", "set", "--path"], "tms marks set --help [INDEX]"),
@@ -200,7 +201,7 @@ CASES = [
     ],
     (
         ["marks", "delete", "--all=x"],
-        unexpected_value("", "all", "x", usage="tms marks delete <INDEX|--all>"),
+        unexpected_value("all", "x", "tms marks delete <INDEX|--all>"),
     ),
     (
         ["marks", "delete", "--al=x"],
@@ -232,12 +233,14 @@ SHORT_OPTIONS = [
 ]
 
 
-def completion_output(shell, prefix, options):
-    if shell in ("bash", "elvish"):
-        return "\n".join(prefix + short for short, _ in options).encode()
-    separator = ":" if shell == "zsh" else "\t"
-    lines = [prefix + short + separator + about for short, about in options]
-    return ("\n".join(lines) + ("" if shell == "zsh" else "\n")).encode()
+# Completion candidate separator and trailing text for each shell.
+SHELLS = (
+    ("bash", None, ""),
+    ("elvish", None, ""),
+    ("fish", "\t", "\n"),
+    ("powershell", "\t", "\n"),
+    ("zsh", ":", ""),
+)
 
 
 def main():
@@ -260,12 +263,33 @@ def main():
         }
         for key in ("COMPLETE", "TMUX"):
             env.pop(key, None)
-        for case, stderr in CASES:
+        runs = [
+            (repr(case), case, {}, (2, b"", stderr.encode(), original))
+            for case, stderr in CASES
+        ]
+        for context, options in SHORT_OPTIONS:
+            for token in ("-h=x", "-h=", "-hx=y"):
+                words = ["tms", *context, token]
+                for shell, separator, end in SHELLS:
+                    stdout = "\n".join(
+                        token + short + (separator + about if separator else "")
+                        for short, about in options
+                    )
+                    index = str(len(words) - 1)
+                    runs.append(
+                        (
+                            f"{shell} {words!r}",
+                            ["--", *words],
+                            {"COMPLETE": shell, "_CLAP_COMPLETE_INDEX": index},
+                            (0, (stdout + end).encode(), b"", original),
+                        )
+                    )
+        for label, argv, extra_env, expected in runs:
             config.write_bytes(original)
             result = subprocess.run(
-                [str(binary), *case],
+                [str(binary), *argv],
                 cwd=d,
-                env=env,
+                env=env | extra_env,
                 capture_output=True,
                 timeout=10,
             )
@@ -275,51 +299,14 @@ def main():
                 result.stderr,
                 config.read_bytes(),
             )
-            expected = (2, b"", stderr.encode(), original)
             if actual != expected:
                 failures += 1
                 print(
-                    f"FAIL {binary}: {case!r}\n"
+                    f"FAIL {binary}: {label}\n"
                     f"  expected: {expected!r}\n  actual: {actual!r}"
                 )
-        completion_count = 0
-        for context, options in SHORT_OPTIONS:
-            for token in ("-h=x", "-h=", "-hx=y"):
-                words = ["tms", *context, token]
-                for shell in ("bash", "elvish", "fish", "powershell", "zsh"):
-                    completion_count += 1
-                    config.write_bytes(original)
-                    result = subprocess.run(
-                        [str(binary), "--", *words],
-                        cwd=d,
-                        env=env
-                        | {
-                            "COMPLETE": shell,
-                            "_CLAP_COMPLETE_INDEX": str(len(words) - 1),
-                        },
-                        capture_output=True,
-                        timeout=10,
-                    )
-                    actual = (
-                        result.returncode,
-                        result.stdout,
-                        result.stderr,
-                        config.read_bytes(),
-                    )
-                    expected = (
-                        0,
-                        completion_output(shell, token, options),
-                        b"",
-                        original,
-                    )
-                    if actual != expected:
-                        failures += 1
-                        print(
-                            f"FAIL {binary}: {shell} {words!r}\n"
-                            f"  expected: {expected!r}\n  actual: {actual!r}"
-                        )
     print(f"{len(CASES)} CLI diagnostic/preservation cases; {failures} failures")
-    print(f"{completion_count} short-option completion cases")
+    print(f"{len(runs) - len(CASES)} short-option completion cases")
     return bool(failures)
 
 

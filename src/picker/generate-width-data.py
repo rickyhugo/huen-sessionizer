@@ -67,23 +67,15 @@ fn main() {
     std::io::stdout().write_all(&out).unwrap();
 }
 """
-    source = source.replace("TABLES", '"' + str(tables) + '"')
-    source = source.replace("SEGMENTATION", '"' + str(segmentation) + '"')
+    source = source.replace("TABLES", f'"{tables}"')
+    source = source.replace("SEGMENTATION", f'"{segmentation}"')
     with tempfile.TemporaryDirectory(prefix="tms-width-") as directory:
-        root = Path(directory)
-        (root / "generate.rs").write_text(source)
+        rust, binary = Path(directory) / "generate.rs", Path(directory) / "generate"
+        rust.write_text(source)
         subprocess.run(
-            [
-                "rustc",
-                "--edition=2021",
-                "-O",
-                str(root / "generate.rs"),
-                "-o",
-                str(root / "generate"),
-            ],
-            check=True,
+            ["rustc", "--edition=2021", "-O", str(rust), "-o", str(binary)], check=True
         )
-        output = subprocess.check_output([str(root / "generate")])
+        output = subprocess.check_output([str(binary)])
     assert len(output) % 13 == 0
     Path(__file__).with_name("width-data.bin").write_bytes(output)
 

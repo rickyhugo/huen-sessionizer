@@ -83,9 +83,6 @@ class PackagingTests(unittest.TestCase):
     def build_archive(self):
         with patch.object(package.subprocess, "run", side_effect=self.compile_stub):
             package.build(self.target, self.archive.parent, smoke=False)
-        return self.read_archive()
-
-    def read_archive(self):
         with tarfile.open(self.archive) as archive:
             return [
                 (copy.copy(member), archive.extractfile(member).read())
@@ -203,9 +200,8 @@ class PackagingTests(unittest.TestCase):
                     member.type = tarfile.SYMTYPE
                     member.linkname = "LICENSE"
                 else:
-                    binary, data = entries[binary_index]
                     entries[binary_index] = (
-                        binary,
+                        entries[binary_index][0],
                         struct.pack("<IIII", 0xFEEDFACF, 0x1000007, 0, 2),
                     )
                 self.rewrite_archive(entries)

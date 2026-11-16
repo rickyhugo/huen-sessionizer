@@ -64,24 +64,13 @@ def notices():
         files[Path(name)] = path
     # Include additional conventionally named notices without weakening the
     # required manifest when a source notice is removed or renamed.
+    prefixes = ("LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE", "THIRD_PARTY")
     for base in (ROOT, ROOT / "vendor", ROOT / "src"):
-        if not base.exists():
-            continue
-        candidates = base.iterdir() if base == ROOT else base.rglob("*")
-        for path in candidates:
+        for path in base.iterdir() if base == ROOT else base.rglob("*"):
             relative = path.relative_to(ROOT)
             if path.is_file() and (
                 relative.is_relative_to("vendor/licenses")
-                or path.name.upper().startswith(
-                    (
-                        "LICENSE",
-                        "LICENCE",
-                        "COPYING",
-                        "COPYRIGHT",
-                        "NOTICE",
-                        "THIRD_PARTY",
-                    )
-                )
+                or path.name.upper().startswith(prefixes)
             ):
                 if path.is_symlink():
                     raise ValueError(f"license or notice must not be a symlink: {path}")
@@ -94,14 +83,6 @@ def notices():
     }.items():
         files[Path("notices") / name] = compiler / relative
     return dict(sorted(files.items()))
-
-
-def install_notices(destination):
-    for relative, source in notices().items():
-        output = destination / relative
-        output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, output)
-        output.chmod(0o644)
 
 
 def archive_name(target):
@@ -118,16 +99,14 @@ def verify(archive, target, smoke=False):
     name = archive_name(target)
     if archive.name != f"{name}.tar.gz":
         raise ValueError(f"expected archive name {name}.tar.gz")
-    with archive.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     checksum = archive.with_name(archive.name + ".sha256").read_text()
     if checksum != f"{digest}  {archive.name}\n":
         raise ValueError("archive checksum does not match")
     legal_files = {
         f"{name}/{path.as_posix()}": source for path, source in notices().items()
     }
-    expected = {f"{name}/tms": 0o755}
-    expected.update({path: 0o644 for path in legal_files})
+    expected = {f"{name}/tms": 0o755} | {path: 0o644 for path in legal_files}
     with tarfile.open(archive, "r:gz") as tar:
         members = tar.getmembers()
         if (
@@ -213,8 +192,7 @@ def build(target, output, smoke):
             cwd=ROOT,
             check=True,
         )
-        files = {Path("tms"): prefix / "bin/tms"}
-        files.update(notices())
+        files = {Path("tms"): prefix / "bin/tms", **notices()}
         with (
             archive.open("wb") as raw,
             gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as compressed,
@@ -226,8 +204,7 @@ def build(target, output, smoke):
                 member.size = len(data)
                 member.mode = 0o755 if relative == Path("tms") else 0o644
                 tar.addfile(member, io.BytesIO(data))
-    with archive.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_name(archive.name + ".sha256").write_text(
         f"{digest}  {archive.name}\n"
     )
@@ -258,7 +235,11 @@ def main():
             raise ValueError(f"release tag must be v{version()}")
         print(args.tag)
     elif args.command == "notices":
-        install_notices(args.dest)
+        for relative, source in notices().items():
+            output = args.dest / relative
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, output)
+            output.chmod(0o644)
     elif args.command == "build":
         build(args.target, args.output, args.smoke)
     elif args.command == "verify":

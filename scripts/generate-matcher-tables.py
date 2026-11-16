@@ -17,36 +17,30 @@ CRATES = {
     "unicode-segmentation-1.12.0": "f6ccf251212114b54433ec949fd6a7841275f9ada20dddd2f29e9ceea4501493",
 }
 RUST_COMMIT = "b940084d7eb6a299eb4bfeb8e34901bc051e7ac4"
-
-
-def unpack(crate, checksum, destination):
-    cargo = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
-    cached = list((cargo / "registry/cache").glob(f"*/{crate}.crate"))
-    if cached:
-        data = cached[0].read_bytes()
-    else:
-        name, version = crate.rsplit("-", 1)
-        url = f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
-        with urllib.request.urlopen(url) as response:
-            data = response.read()
-    if hashlib.sha256(data).hexdigest() != checksum:
-        raise SystemExit(f"Checksum mismatch for {crate}")
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        archive.extractall(destination, filter="data")
-    return destination / crate
+RUSTC = ["mise", "exec", "rust@1.99.0", "--", "rustc"]
 
 
 def main():
-    version = subprocess.check_output(
-        ["mise", "exec", "rust@1.99.0", "--", "rustc", "-vV"], text=True
-    )
+    version = subprocess.check_output([*RUSTC, "-vV"], text=True)
     if f"commit-hash: {RUST_COMMIT}\n" not in version:
         raise SystemExit("Table generation requires the pinned Rust 1.99.0 compiler")
     with tempfile.TemporaryDirectory(prefix="tms-unicode-") as temporary:
         directory = Path(temporary)
-        matcher, segmentation = [
-            unpack(crate, checksum, directory) for crate, checksum in CRATES.items()
-        ]
+        cargo = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+        for crate, checksum in CRATES.items():
+            cached = list((cargo / "registry/cache").glob(f"*/{crate}.crate"))
+            if cached:
+                data = cached[0].read_bytes()
+            else:
+                name = crate.rsplit("-", 1)[0]
+                url = f"https://static.crates.io/crates/{name}/{crate}.crate"
+                with urllib.request.urlopen(url) as response:
+                    data = response.read()
+            if hashlib.sha256(data).hexdigest() != checksum:
+                raise SystemExit(f"Checksum mismatch for {crate}")
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                archive.extractall(directory, filter="data")
+        matcher, segmentation = (directory / crate for crate in CRATES)
         source = directory / "generate.rs"
         source.write_text(
             f'#[path = "{matcher}/src/chars/normalize.rs"] mod normalize;\n'
@@ -75,19 +69,7 @@ fn main() {
         )
         binary = directory / "generate"
         subprocess.run(
-            [
-                "mise",
-                "exec",
-                "rust@1.99.0",
-                "--",
-                "rustc",
-                "--edition=2021",
-                "-O",
-                str(source),
-                "-o",
-                str(binary),
-            ],
-            check=True,
+            [*RUSTC, "--edition=2021", "-O", str(source), "-o", str(binary)], check=True
         )
         rows = [
             [
