@@ -96,7 +96,7 @@ fn exact(haystack: Text, atom: Atom, start: usize, end: usize) ?u16 {
     const needle = atom.needle;
     if (end - start != needle.chars.len) return null;
     if (haystack.ascii and !needle.ascii) return null;
-    if (haystack.ascii and needle.ascii and !atom.ignore_case) {
+    if (haystack.ascii and !atom.ignore_case) {
         // Upstream compares the whole ASCII haystack in this branch, not its slice.
         if (!std.mem.eql(u21, haystack.chars, needle.chars)) return null;
     } else {
@@ -107,45 +107,13 @@ fn exact(haystack: Text, atom: Atom, start: usize, end: usize) ?u16 {
     return calculate(haystack, atom, start, end);
 }
 
-fn leading(haystack: Text) usize {
-    for (haystack.chars, 0..) |cp, i| {
-        if (!(if (haystack.ascii) unicode.asciiWhitespace(cp) else unicode.whitespace(cp))) return i;
-    }
-    return 0;
-}
-
-fn trailing(haystack: Text) usize {
-    var i = haystack.chars.len;
-    while (i > 0) {
-        i -= 1;
-        const cp = haystack.chars[i];
-        if (!(if (haystack.ascii) unicode.asciiWhitespace(cp) else unicode.whitespace(cp)))
-            return haystack.chars.len - i - 1;
-    }
-    return 0;
-}
-
-fn anchored(haystack: Text, atom: Atom) ?u16 {
-    const needle = atom.needle.chars;
-    const start = if (atom.kind != .postfix and !unicode.whitespace(needle[0])) leading(haystack) else 0;
-    const trim = if (atom.kind != .prefix and !unicode.whitespace(needle[needle.len - 1])) trailing(haystack) else 0;
-    if (haystack.chars.len - start < needle.len or haystack.chars.len - trim < needle.len) return null;
-    return switch (atom.kind) {
-        .prefix => exact(haystack, atom, start, start + needle.len),
-        .postfix => exact(haystack, atom, haystack.chars.len - trim - needle.len, haystack.chars.len - trim),
-        .exact => if (start > haystack.chars.len - trim) null else exact(haystack, atom, start, haystack.chars.len - trim),
-        else => unreachable,
-    };
-}
-
 const Bounds = struct { start: usize, greedy_end: usize, end: usize };
 
 fn prefilter(haystack: Text, atom: Atom) ?Bounds {
     const hay = haystack.chars;
     const needle = atom.needle.chars;
-    var start: usize = 0;
-    while (start < hay.len - needle.len + 1) : (start += 1) {
-        if (normalized(hay[start], atom) == needle[0]) break;
+    const start = for (hay[0 .. hay.len - needle.len + 1], 0..) |cp, i| {
+        if (normalized(cp, atom) == needle[0]) break i;
     } else return null;
     if (haystack.ascii) {
         var greedy_end = start + 1;
@@ -164,111 +132,6 @@ fn prefilter(haystack: Text, atom: Atom) ?Bounds {
     return .{ .start = start, .greedy_end = start + 1, .end = end };
 }
 
-fn single(haystack: Text, atom: Atom) ?u16 {
-    var start: usize = 0;
-    while (start < haystack.chars.len and normalized(haystack.chars[start], atom) != atom.needle.chars[0]) : (start += 1) {}
-    if (start == haystack.chars.len) return null;
-    var previous = previousClass(haystack, start);
-    var best: u16 = 0;
-    for (haystack.chars[start..], start..) |cp, i| {
-        if (classNormalized(cp, atom) != atom.needle.chars[0]) continue;
-        const current = unicode.class(cp);
-        if (haystack.ascii) previous = previousClass(haystack, i);
-        const current_bonus = bonus(previous, current);
-        previous = current;
-        best = @max(best, 16 + 2 * current_bonus);
-        if (current_bonus >= 10) break;
-    }
-    return best;
-}
-
-fn substring(haystack: Text, atom: Atom) ?u16 {
-    const hay = haystack.chars;
-    const needle = atom.needle.chars;
-    if (needle.len > hay.len) return null;
-    if (needle.len == hay.len) return exact(haystack, atom, 0, hay.len);
-    if (haystack.ascii and !atom.needle.ascii) return null;
-    if (needle.len == 1) return single(haystack, atom);
-    var start: usize = 0;
-    if (!haystack.ascii) start = (prefilter(haystack, atom) orelse return null).start;
-    var previous = previousClass(haystack, start);
-    var best: u16 = 0;
-    var position: usize = 0;
-    var i = start;
-    var first_letter: ?usize = null;
-    if (haystack.ascii and atom.ignore_case) {
-        for (needle, 0..) |cp, j| {
-            if (cp >= 'a' and cp <= 'z') {
-                first_letter = j;
-                break;
-            }
-        }
-    }
-    const memmem = haystack.ascii and (!atom.ignore_case or first_letter == null or first_letter.? >= 2);
-    // The Unicode implementation excludes the last possible substring start.
-    const limit = hay.len - needle.len + @as(usize, @intFromBool(haystack.ascii));
-    while (i < limit) {
-        const cp = hay[i];
-        const current = unicode.class(cp);
-        if (!haystack.ascii and classNormalized(cp, atom) != needle[0]) {
-            i += 1;
-            continue;
-        }
-        if (haystack.ascii) previous = previousClass(haystack, i);
-        const current_bonus = bonus(previous, current);
-        previous = current;
-        var matched = true;
-        if (memmem) {
-            // memmem's iterator is non-overlapping, including its truncated prefilter.
-            if (atom.ignore_case and first_letter != null and
-                i + needle.len > hay.len - needle.len + first_letter.?)
-            {
-                matched = false;
-            } else matched = std.mem.eql(u21, hay[i .. i + needle.len], needle);
-        } else {
-            for (hay[i .. i + needle.len], needle) |actual, expected| {
-                if (normalized(actual, atom) != expected) {
-                    matched = false;
-                    break;
-                }
-            }
-        }
-        if (matched and 16 + 2 * current_bonus > best) {
-            best = 16 + 2 * current_bonus;
-            position = i;
-            if (current_bonus >= 10) break;
-        }
-        i += if (memmem and matched) needle.len else 1;
-    }
-    if (best == 0) return null;
-    return calculate(haystack, atom, position, position + needle.len);
-}
-
-fn greedy(haystack: Text, atom: Atom, bounds: Bounds) ?u16 {
-    const hay = haystack.chars;
-    const needle = atom.needle.chars;
-    var end = bounds.greedy_end;
-    if (!haystack.ascii) {
-        var cursor = end;
-        for (needle[1..]) |expected| {
-            while (cursor < hay.len and normalized(hay[cursor], atom) != expected) : (cursor += 1) {}
-            if (cursor == hay.len) return null;
-            cursor += 1;
-        }
-        end = cursor;
-    }
-    var cursor = end;
-    var index = needle.len;
-    while (cursor > bounds.start) {
-        cursor -= 1;
-        if (normalized(hay[cursor], atom) == needle[index - 1]) {
-            index -= 1;
-            if (index == 0) return calculate(haystack, atom, cursor, end);
-        }
-    }
-    unreachable;
-}
-
 fn nextCell(p_score: u16, current_bonus: u16, cell: Cell) Cell {
     if (cell.score == 0 and cell.consecutive == 0)
         return .{ .score = p_score + current_bonus + 16, .consecutive = current_bonus };
@@ -282,96 +145,172 @@ fn nextCell(p_score: u16, current_bonus: u16, cell: Cell) Cell {
         .{ .score = skipped + 16, .consecutive = current_bonus };
 }
 
-fn scoreRow(
-    hay: []const u21,
-    bonuses: []const u16,
-    row: []Cell,
-    row_offset: usize,
-    next_offset: usize,
-    needle_index: usize,
-    cp: u21,
-    next_cp: u21,
-) void {
-    const first = needle_index == 0;
-    var previous_p: u16 = 0;
-    var previous_m: u16 = 0;
-    var j = row_offset;
-    while (j + 1 < next_offset) : (j += 1) {
-        const p = @max(previous_m -| 3, previous_p -| 1);
-        const cell: Cell = if (first)
-            (if (hay[j] == cp) .{ .score = 16 + 2 * bonuses[j], .consecutive = bonuses[j] } else .{})
-        else
-            row[j - needle_index];
-        previous_p = p;
-        previous_m = cell.score;
-    }
-    j = next_offset - 1;
-    while (j + 1 < hay.len and j - needle_index < row.len) : (j += 1) {
-        const p = @max(previous_m -| 3, previous_p -| 1);
-        const cell: Cell = if (first)
-            (if (hay[j] == cp) .{ .score = 16 + 2 * bonuses[j], .consecutive = bonuses[j] } else .{})
-        else
-            row[j - needle_index];
-        row[j - needle_index] = if (hay[j + 1] == next_cp) nextCell(p, bonuses[j + 1], cell) else .{};
-        previous_p = p;
-        previous_m = cell.score;
-    }
-}
-
-fn optimal(allocator: std.mem.Allocator, workspace: *Workspace, haystack: Text, atom: Atom, bounds: Bounds) !?u16 {
-    const length = bounds.end - bounds.start;
+pub fn score(allocator: std.mem.Allocator, workspace: *Workspace, haystack: Text, atom: Atom) !?u16 {
+    const hay = haystack.chars;
     const needle = atom.needle.chars;
+    if (needle.len > hay.len) return null;
+    if (atom.kind == .prefix or atom.kind == .postfix or atom.kind == .exact) {
+        var start: usize = 0;
+        if (atom.kind != .postfix and !unicode.whitespace(needle[0])) {
+            start = for (hay, 0..) |cp, i| {
+                if (!(if (haystack.ascii) unicode.asciiWhitespace(cp) else unicode.whitespace(cp))) break i;
+            } else 0;
+        }
+        var end = hay.len;
+        if (atom.kind != .prefix and !unicode.whitespace(needle[needle.len - 1])) {
+            var i = hay.len;
+            end = while (i > 0) : (i -= 1) {
+                const cp = hay[i - 1];
+                if (!(if (haystack.ascii) unicode.asciiWhitespace(cp) else unicode.whitespace(cp))) break i;
+            } else hay.len;
+        }
+        if (hay.len - start < needle.len or end < needle.len) return null;
+        return switch (atom.kind) {
+            .prefix => exact(haystack, atom, start, start + needle.len),
+            .postfix => exact(haystack, atom, end - needle.len, end),
+            .exact => exact(haystack, atom, start, end),
+            .fuzzy, .substring => unreachable,
+        };
+    }
+    if (needle.len == hay.len) return exact(haystack, atom, 0, hay.len);
+    if (haystack.ascii and !atom.needle.ascii) return null;
+    if (needle.len == 1) {
+        const start = for (hay, 0..) |cp, i| {
+            if (normalized(cp, atom) == needle[0]) break i;
+        } else return null;
+        var previous = previousClass(haystack, start);
+        var best: u16 = 0;
+        for (hay[start..], start..) |cp, i| {
+            if (classNormalized(cp, atom) != needle[0]) continue;
+            const current = unicode.class(cp);
+            if (haystack.ascii) previous = previousClass(haystack, i);
+            const current_bonus = bonus(previous, current);
+            previous = current;
+            best = @max(best, 16 + 2 * current_bonus);
+            if (current_bonus >= 10) break;
+        }
+        return best;
+    }
+    if (atom.kind == .substring) {
+        const start = if (haystack.ascii) 0 else (prefilter(haystack, atom) orelse return null).start;
+        var previous = previousClass(haystack, start);
+        var best: u16 = 0;
+        var position: usize = 0;
+        const first_letter: ?usize = if (!haystack.ascii or !atom.ignore_case) null else for (needle, 0..) |cp, j| {
+            if (cp >= 'a' and cp <= 'z') break j;
+        } else null;
+        const memmem = haystack.ascii and (!atom.ignore_case or first_letter == null or first_letter.? >= 2);
+        // The Unicode implementation excludes the last possible substring start.
+        const limit = hay.len - needle.len + @intFromBool(haystack.ascii);
+        var i = start;
+        while (i < limit) {
+            const cp = hay[i];
+            if (!haystack.ascii and classNormalized(cp, atom) != needle[0]) {
+                i += 1;
+                continue;
+            }
+            const current = unicode.class(cp);
+            if (haystack.ascii) previous = previousClass(haystack, i);
+            const current_bonus = bonus(previous, current);
+            previous = current;
+            // memmem's iterator is non-overlapping, including its truncated prefilter.
+            const truncated = if (first_letter) |letter| i + needle.len > hay.len - needle.len + letter else false;
+            const matched = if (memmem) !truncated and std.mem.eql(u21, hay[i .. i + needle.len], needle) else for (hay[i .. i + needle.len], needle) |actual, expected| {
+                if (normalized(actual, atom) != expected) break false;
+            } else true;
+            if (matched and 16 + 2 * current_bonus > best) {
+                best = 16 + 2 * current_bonus;
+                position = i;
+                if (current_bonus >= 10) break;
+            }
+            i += if (memmem and matched) needle.len else 1;
+        }
+        if (best == 0) return null;
+        return calculate(haystack, atom, position, position + needle.len);
+    }
+    const bounds = prefilter(haystack, atom) orelse return null;
+    const length = bounds.end - bounds.start;
+    if (length == needle.len) {
+        return if (haystack.ascii)
+            calculate(haystack, atom, bounds.start, bounds.greedy_end)
+        else
+            exact(haystack, atom, bounds.start, bounds.end);
+    }
     const width = length + 1 - needle.len;
     // Match MatrixLayout and the 133120-byte upstream slab, including alignment.
     var bytes = length * @as(usize, if (haystack.ascii) 1 else 4) + length;
     bytes = std.mem.alignForward(usize, bytes, 2) + 2 * needle.len;
     bytes = std.mem.alignForward(usize, bytes, 8) + 8 * width + width * needle.len;
-    if (length > 65535 or needle.len > 2048 or length * needle.len > 100 * 1024 or bytes > 133120)
-        return greedy(haystack, atom, bounds);
+    if (length > 65535 or needle.len > 2048 or length * needle.len > 100 * 1024 or bytes > 133120) {
+        var end = bounds.greedy_end;
+        if (!haystack.ascii) {
+            for (needle[1..]) |expected| {
+                while (end < hay.len and normalized(hay[end], atom) != expected) : (end += 1) {}
+                if (end == hay.len) return null;
+                end += 1;
+            }
+        }
+        var cursor = end;
+        var index = needle.len;
+        while (cursor > bounds.start) {
+            cursor -= 1;
+            if (normalized(hay[cursor], atom) != needle[index - 1]) continue;
+            index -= 1;
+            if (index == 0) return calculate(haystack, atom, cursor, end);
+        }
+        unreachable;
+    }
 
     try workspace.normalized.resize(allocator, length);
     try workspace.bonuses.resize(allocator, length);
     try workspace.offsets.resize(allocator, needle.len);
     try workspace.row.resize(allocator, width);
-    const hay = workspace.normalized.items;
+    const folded = workspace.normalized.items;
     const bonuses = workspace.bonuses.items;
     const offsets = workspace.offsets.items;
     const row = workspace.row.items;
     @memset(row, .{});
     var previous = previousClass(haystack, bounds.start);
     var index: usize = 0;
-    for (haystack.chars[bounds.start..bounds.end], 0..) |cp, i| {
+    for (hay[bounds.start..bounds.end], 0..) |cp, i| {
         const current = unicode.class(cp);
-        hay[i] = classNormalized(cp, atom);
+        folded[i] = classNormalized(cp, atom);
         bonuses[i] = bonus(previous, current);
         previous = current;
-        if (index < needle.len and hay[i] == needle[index]) {
+        if (index < needle.len and folded[i] == needle[index]) {
             offsets[index] = i;
             index += 1;
         }
     }
     if (index != needle.len) return null;
-    for (0..needle.len - 1) |i|
-        scoreRow(hay, bonuses, row, offsets[i], offsets[i + 1], i, needle[i], needle[i + 1]);
+    for (0..needle.len - 1) |n| {
+        var previous_p: u16 = 0;
+        var previous_m: u16 = 0;
+        var j = offsets[n];
+        while (j + 1 < offsets[n + 1]) : (j += 1) {
+            const p = @max(previous_m -| 3, previous_p -| 1);
+            const cell: Cell = if (n == 0)
+                (if (folded[j] == needle[0]) .{ .score = 16 + 2 * bonuses[j], .consecutive = bonuses[j] } else .{})
+            else
+                row[j - n];
+            previous_p = p;
+            previous_m = cell.score;
+        }
+        j = offsets[n + 1] - 1;
+        while (j + 1 < folded.len and j - n < row.len) : (j += 1) {
+            const p = @max(previous_m -| 3, previous_p -| 1);
+            const cell: Cell = if (n == 0)
+                (if (folded[j] == needle[0]) .{ .score = 16 + 2 * bonuses[j], .consecutive = bonuses[j] } else .{})
+            else
+                row[j - n];
+            row[j - n] = if (folded[j + 1] == needle[n + 1]) nextCell(p, bonuses[j + 1], cell) else .{};
+            previous_p = p;
+            previous_m = cell.score;
+        }
+    }
     var best: u16 = 0;
     for (row[offsets[needle.len - 1] + 1 - needle.len ..]) |cell| best = @max(best, cell.score);
     return best;
-}
-
-pub fn score(allocator: std.mem.Allocator, workspace: *Workspace, haystack: Text, atom: Atom) !?u16 {
-    const needle = atom.needle.chars;
-    if (needle.len > haystack.chars.len) return null;
-    if (atom.kind == .prefix or atom.kind == .postfix or atom.kind == .exact) return anchored(haystack, atom);
-    if (atom.kind == .substring) return substring(haystack, atom);
-    if (needle.len == haystack.chars.len) return exact(haystack, atom, 0, haystack.chars.len);
-    if (haystack.ascii and !atom.needle.ascii) return null;
-    if (needle.len == 1) return single(haystack, atom);
-    const bounds = prefilter(haystack, atom) orelse return null;
-    if (bounds.end - bounds.start == needle.len) {
-        if (haystack.ascii) return calculate(haystack, atom, bounds.start, bounds.greedy_end);
-        return exact(haystack, atom, bounds.start, bounds.end);
-    }
-    return optimal(allocator, workspace, haystack, atom, bounds);
 }
 
 test "default general-text scores match upstream score vectors" {
