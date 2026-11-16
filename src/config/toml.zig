@@ -21,7 +21,10 @@ pub fn parseDetailed(a: A, text: []const u8, message: ?*?[]const u8) !Value {
     const result = c.toml_parse(text.ptr, std.math.cast(c_int, text.len) orelse return error.InvalidToml);
     defer c.toml_free(result);
     if (!result.ok) {
-        if (message) |m| m.* = try @import("diagnostic.zig").format(a, text, std.mem.sliceTo(&result.errmsg, 0));
+        if (message) |m| {
+            const native = std.mem.sliceTo(&result.errmsg, 0);
+            m.* = try @import("diagnostic.zig").format(a, text, native) orelse try a.dupe(u8, native);
+        }
         return error.InvalidToml;
     }
     return copy(a, text, result.toptab);
@@ -75,30 +78,18 @@ fn timestamp(a: A, text: []const u8, value: c.toml_datum_t) ![]const u8 {
 }
 
 pub fn merge(a: A, base: *Value, later: Value) !void {
-    if (base.* == .table and later == .table) {
-        var it = later.table.iterator();
-        while (it.next()) |entry| {
-            const slot = try base.table.getOrPut(a, entry.key_ptr.*);
-            if (slot.found_existing) {
-                try merge(a, slot.value_ptr, entry.value_ptr.*);
-            } else {
-                slot.value_ptr.* = entry.value_ptr.*;
-            }
-        }
-    } else base.* = later;
+    if (base.* != .table or later != .table) {
+        base.* = later;
+        return;
+    }
+    var it = later.table.iterator();
+    while (it.next()) |entry| {
+        const slot = try base.table.getOrPut(a, entry.key_ptr.*);
+        if (slot.found_existing) try merge(a, slot.value_ptr, entry.value_ptr.*) else slot.value_ptr.* = entry.value_ptr.*;
+    }
 }
 
-pub fn string(a: A, value: Value) ![]const u8 {
-    return switch (value) {
-        .string => |s| s,
-        .integer => |n| std.fmt.allocPrint(a, "{d}", .{n}),
-        .float => |n| if (std.math.isNan(n)) "NaN" else std.fmt.allocPrint(a, "{d}", .{n}),
-        .boolean => |b| if (b) "true" else "false",
-        else => error.InvalidConfigType,
-    };
-}
-
-pub fn boolean(value: Value) !bool {
+fn boolean(value: Value) !bool {
     return switch (value) {
         .boolean => |b| b,
         .integer => |n| n != 0,
@@ -108,16 +99,6 @@ pub fn boolean(value: Value) !bool {
             inline for (.{ "false", "no", "off", "0" }) |no| if (std.ascii.eqlIgnoreCase(s, no)) break :blk false;
             return error.InvalidConfigType;
         },
-        else => error.InvalidConfigType,
-    };
-}
-
-fn unsigned(value: Value) !usize {
-    return switch (value) {
-        .integer => |n| std.math.cast(usize, n) orelse error.InvalidConfigType,
-        .boolean => |b| @intFromBool(b),
-        .float => |n| if (std.math.isNan(n) or n <= 0) 0 else if (n >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) std.math.maxInt(usize) else @intFromFloat(@round(n)),
-        .string => |s| cfg.parseIndex(s) catch if (boolean(value)) |b| @intFromBool(b) else |_| return error.InvalidConfigType,
         else => error.InvalidConfigType,
     };
 }
@@ -180,9 +161,21 @@ pub fn explain(comptime T: type, a: A, value: Value, key: []const u8, source: []
 }
 
 pub fn decode(comptime T: type, a: A, value: Value) anyerror!T {
-    if (T == []const u8) return string(a, value);
+    if (T == []const u8) return switch (value) {
+        .string => |s| s,
+        .integer => |n| std.fmt.allocPrint(a, "{d}", .{n}),
+        .float => |n| if (std.math.isNan(n)) "NaN" else std.fmt.allocPrint(a, "{d}", .{n}),
+        .boolean => |b| if (b) "true" else "false",
+        else => error.InvalidConfigType,
+    };
     if (T == bool) return boolean(value);
-    if (T == usize or T == u8) return std.math.cast(T, try unsigned(value)) orelse error.InvalidConfigType;
+    if (T == usize or T == u8) return std.math.cast(T, @as(usize, switch (value) {
+        .integer => |n| std.math.cast(usize, n) orelse return error.InvalidConfigType,
+        .boolean => |b| @intFromBool(b),
+        .float => |n| if (std.math.isNan(n) or n <= 0) 0 else if (n >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) std.math.maxInt(usize) else @intFromFloat(@round(n)),
+        .string => |s| cfg.parseIndex(s) catch @intFromBool(try boolean(value)),
+        else => return error.InvalidConfigType,
+    })) orelse error.InvalidConfigType;
     if (T == cfg.Color) {
         if (value == .table) {
             if (value.table.count() != 1) return error.InvalidColor;
@@ -201,10 +194,7 @@ pub fn decode(comptime T: type, a: A, value: Value) anyerror!T {
         if (value != .table) return error.InvalidConfigType;
         var bindings: std.ArrayList(cfg.Binding) = .empty;
         var it = value.table.iterator();
-        while (it.next()) |entry| {
-            const binding: cfg.Binding = .{ .key = try cfg.parseKey(entry.key_ptr.*), .action = try decode(cfg.PickerAction, a, entry.value_ptr.*) };
-            try cfg.setBinding(a, &bindings, binding);
-        }
+        while (it.next()) |entry| try cfg.setBinding(a, &bindings, .{ .key = try cfg.parseKey(entry.key_ptr.*), .action = try decode(cfg.PickerAction, a, entry.value_ptr.*) });
         return bindings.toOwnedSlice(a);
     }
     if (T == std.StringHashMapUnmanaged(cfg.SessionConfig) or T == std.StringHashMapUnmanaged([]const u8)) {
@@ -356,18 +346,11 @@ fn write(a: A, w: *std.Io.Writer, value: anytype) anyerror!void {
             var first = true;
             inline for (s.field_names, s.field_types) |name, Field| {
                 const v = @field(value, name);
-                if (@typeInfo(Field) == .optional) {
-                    if (v) |present| {
-                        if (!first) try w.writeAll(", ");
-                        first = false;
-                        try w.print("{s} = ", .{name});
-                        try write(a, w, present);
-                    }
-                } else {
+                if (if (@typeInfo(Field) == .optional) v else @as(?Field, v)) |present| {
                     if (!first) try w.writeAll(", ");
                     first = false;
                     try w.print("{s} = ", .{name});
-                    try write(a, w, v);
+                    try write(a, w, present);
                 }
             }
             try w.writeByte('}');
