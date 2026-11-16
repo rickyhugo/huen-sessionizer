@@ -20,7 +20,6 @@ const Match = struct {
 };
 
 /// Returns caller-owned original candidate indices. Inputs remain borrowed.
-/// All query, Unicode, and scoring scratch is freed before returning.
 pub fn rank(allocator: std.mem.Allocator, query: []const u8, candidates: []const []const u8) ![]usize {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -39,22 +38,11 @@ pub fn rank(allocator: std.mem.Allocator, query: []const u8, candidates: []const
     for (candidates, 0..) |candidate, index| {
         const text = try unicode.decode(allocator, candidate, &text_buffer);
         var total: u32 = 0;
-        var matched = true;
         for (atoms) |atom| {
             const score = try scoring.score(allocator, &workspace, text, atom);
-            if (atom.negative) {
-                if (score != null) {
-                    matched = false;
-                    break;
-                }
-            } else {
-                total +%= score orelse {
-                    matched = false;
-                    break;
-                };
-            }
-        }
-        if (matched) try matches.append(allocator, .{ .index = index, .score = total, .length = text.chars.len });
+            if (atom.negative == (score != null)) break;
+            total +%= score orelse 0;
+        } else try matches.append(allocator, .{ .index = index, .score = total, .length = text.chars.len });
     }
     std.mem.sort(Match, matches.items, {}, Match.lessThan);
     const result = try allocator.alloc(usize, matches.items.len);
