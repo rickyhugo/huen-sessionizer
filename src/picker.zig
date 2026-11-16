@@ -129,7 +129,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
     var ranked = try matcher.rank(scratch, "", labels);
     defer scratch.free(ranked);
     _ = try reduce(scratch, &state, .{ .matches = ranked }, options);
-    var previews: Previews = .{ .arena = .init(scratch) };
+    var previews: Previews = .{ .gpa = scratch };
     defer previews.deinit(io);
     var decoder: input.Decoder = .{};
     var frame = std.heap.ArenaAllocator.init(scratch);
@@ -143,7 +143,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
         if (try previews.collect(io)) dirty = true;
         if (dirty) {
             _ = frame.reset(.retain_capacity);
-            const text = if (state.selection) |i| try previews.text(io, items, state.ranked[i]) else "";
+            const text = try previews.text(io, items, if (state.selection) |i| state.ranked[i] else null);
             const bytes = try render.draw(frame.allocator(), state, items, options, text);
             tty.write(bytes) catch |err| {
                 _ = try tty.checkSignals();
@@ -173,6 +173,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
                 .confirm, .move_up, .move_down => {
                     rematch = false;
                     try rank(scratch, &state, labels, &ranked, options);
+                    dirty = true;
                 },
                 else => {},
             };
@@ -207,29 +208,45 @@ fn rank(scratch: A, state: *State, labels: []const []const u8, ranked: *[]usize,
 
 /// Fetches one preview at a time in the background so navigation never waits on tmux or the filesystem.
 const Previews = struct {
-    arena: std.heap.ArenaAllocator,
-    cache: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
+    gpa: A,
+    /// Each preview keeps its own arena so a refresh frees the text it replaces.
+    cache: std.AutoHashMapUnmanaged(usize, struct { arena: std.heap.ArenaAllocator, text: []const u8 }) = .empty,
+    /// Owned by the pending fetch until `store` moves it into the cache.
+    job: std.heap.ArenaAllocator = undefined,
     pending: ?struct { item: usize, future: Io.Future([]const u8) } = null,
     done: std.atomic.Value(bool) = .init(false),
     /// The item fetched most recently; selecting any other item fetches again so revisits refresh.
     requested: ?usize = null,
 
     fn deinit(self: *Previews, io: Io) void {
-        if (self.pending) |*job| _ = job.future.cancel(io);
-        self.arena.deinit();
+        if (self.pending) |*pending| {
+            _ = pending.future.cancel(io);
+            self.job.deinit();
+        }
+        var entries = self.cache.valueIterator();
+        while (entries.next()) |entry| entry.arena.deinit();
+        self.cache.deinit(self.gpa);
     }
 
-    /// Returns the last preview fetched for `item`, or "" before its first fetch completes.
-    fn text(self: *Previews, io: Io, items: []const Item, item: usize) ![]const u8 {
-        if (items[item].preview == .none) return "";
-        const cached = self.cache.get(item) orelse "";
+    /// Returns the last preview fetched for the selected item, or "" before its first fetch completes.
+    fn text(self: *Previews, io: Io, items: []const Item, selected: ?usize) ![]const u8 {
+        const item = selected orelse {
+            self.requested = null;
+            return "";
+        };
+        if (items[item].preview == .none) {
+            self.requested = null;
+            return "";
+        }
+        const cached = if (self.cache.get(item)) |entry| entry.text else "";
         if (self.pending != null or self.requested == item) return cached;
         self.requested = item;
         self.done.store(false, .monotonic);
-        const future = io.concurrent(fetch, .{ io, self.arena.allocator(), items[item].preview, &self.done }) catch |err| switch (err) {
+        self.job = .init(self.gpa);
+        const future = io.concurrent(fetch, .{ io, self.job.allocator(), items[item].preview, &self.done }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => {
-                const fetched = fetch(io, self.arena.allocator(), items[item].preview, &self.done);
-                try self.cache.put(self.arena.allocator(), item, fetched);
+                const fetched = fetch(io, self.job.allocator(), items[item].preview, &self.done);
+                try self.store(item, fetched);
                 return fetched;
             },
         };
@@ -239,11 +256,21 @@ const Previews = struct {
 
     /// Stores a finished preview; true means the screen should redraw.
     fn collect(self: *Previews, io: Io) !bool {
-        const job = &(self.pending orelse return false);
+        const pending = self.pending orelse return false;
         if (!self.done.load(.acquire)) return false;
-        try self.cache.put(self.arena.allocator(), job.item, job.future.await(io));
+        var future = pending.future;
         self.pending = null;
+        try self.store(pending.item, future.await(io));
         return true;
+    }
+
+    fn store(self: *Previews, item: usize, fetched: []const u8) !void {
+        errdefer self.job.deinit();
+        const old = try self.cache.fetchPut(self.gpa, item, .{ .arena = self.job, .text = fetched });
+        if (old) |entry| {
+            var arena = entry.value.arena;
+            arena.deinit();
+        }
     }
 
     fn fetch(io: Io, a: A, source: Preview, done: *std.atomic.Value(bool)) []const u8 {

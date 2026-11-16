@@ -269,6 +269,13 @@ def query_then_selection_key(p, keys, expected):
     p.finish(expected)
 
 
+def query_then_unmatched_enter(p):
+    p.send(b"zzzz\r")
+    assert b"0/3" in ANSI.sub(b"", p.frame()), "flushed rerank did not redraw"
+    p.send(b"\x1b")
+    p.finish(3)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", help="Use an existing real-matcher driver")
@@ -311,7 +318,8 @@ def main():
             ("saturated-entry-suspend", suspend_entry),
             ("long-query-signal", long_query_signal),
             ("query-then-enter", lambda p: query_then_selection_key(p, b"beta\r", 2)),
-            ("query-then-move", lambda p: query_then_selection_key(p, b"alp\x1b[B\r", 1)),
+            ("query-then-unmatched-enter", query_then_unmatched_enter),
+            ("query-then-move", lambda p: query_then_selection_key(p, b"b\x1b[B\x1b[B\r", 2)),
         ]
         if args.case is not None and args.case not in dict(tests):
             parser.error(f"unknown scenario: {args.case}")

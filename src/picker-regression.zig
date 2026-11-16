@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
             .{ .key = .{ .code = .enter }, .action = .confirm },
             .{ .key = .{ .code = .down }, .action = .move_down },
         };
-        const items = [_]picker.Item{ .{ .id = 1, .label = "alpha" }, .{ .id = 2, .label = "beta" } };
+        const items = [_]picker.Item{ .{ .id = 1, .label = "alpha" }, .{ .id = 2, .label = "beta" }, .{ .id = 3, .label = "bravo" } };
         const chosen = try picker.choose(init.io, init.gpa, init.gpa, &items, .{ .colors = .{}, .input_position = .top, .bindings = &select_bindings });
         std.process.exit(@intCast(chosen orelse 3));
     }
