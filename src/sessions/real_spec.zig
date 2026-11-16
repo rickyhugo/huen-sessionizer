@@ -12,7 +12,7 @@ fn git(a: std.mem.Allocator, cwd: []const u8, args: []const []const u8) !void {
         .cwd = cwd,
         .stdin = .ignore,
     });
-    if (output.term != .exited or output.term.exited != 0) {
+    if (!output.term.success()) {
         std.debug.print("{s}\n", .{output.stderr});
         return error.FixtureCommandFailed;
     }

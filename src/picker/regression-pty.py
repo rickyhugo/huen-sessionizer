@@ -46,7 +46,17 @@ class Picker:
         self.original = attributes(self.slave)
         self.resize(80)
         if saturated_entry:
-            self.fill_output()
+            flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
+            fcntl.fcntl(self.slave, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            try:
+                for block in (b"x" * 4096, b"x"):
+                    while True:
+                        try:
+                            os.write(self.slave, block)
+                        except BlockingIOError:
+                            break
+            finally:
+                fcntl.fcntl(self.slave, fcntl.F_SETFL, flags)
         self.status, status_writer = os.pipe()
         self.errors = tempfile.TemporaryFile()
 
@@ -91,19 +101,6 @@ class Picker:
 
     def resize(self, width):
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 4, width, 0, 0))
-
-    def fill_output(self):
-        flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
-        fcntl.fcntl(self.slave, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        try:
-            for block in (b"x" * 4096, b"x"):
-                while True:
-                    try:
-                        os.write(self.slave, block)
-                    except BlockingIOError:
-                        break
-        finally:
-            fcntl.fcntl(self.slave, fcntl.F_SETFL, flags)
 
     def wait_raw(self):
         deadline = time.monotonic() + 2
@@ -279,38 +276,14 @@ def main():
         binary = args.binary or str(Path(temp) / "picker-driver")
         if args.binary is None:
             subprocess.run(
-                [
-                    "mise",
-                    "exec",
-                    "--",
-                    "zig",
-                    "build-exe",
-                    "-lc",
-                    "-O",
-                    "ReleaseFast",
-                    "--dep",
-                    "config",
-                    "--dep",
-                    "matcher",
-                    "--dep",
-                    "tmux",
-                    "-Mroot=src/picker-regression.zig",
-                    "-O",
-                    "ReleaseFast",
-                    "-Mconfig=src/config.zig",
-                    "-O",
-                    "ReleaseFast",
-                    "-Mmatcher=src/matcher.zig",
-                    "-O",
-                    "ReleaseFast",
-                    "--dep",
-                    "process",
-                    "-Mtmux=src/tmux.zig",
-                    "-O",
-                    "ReleaseFast",
-                    "-Mprocess=src/process.zig",
-                    f"-femit-bin={binary}",
-                ],
+                "mise exec -- zig build-exe -lc -O ReleaseFast"
+                " --dep config --dep matcher --dep tmux"
+                " -Mroot=src/picker-regression.zig -O ReleaseFast"
+                " -Mconfig=src/config.zig -O ReleaseFast"
+                " -Mmatcher=src/matcher.zig -O ReleaseFast"
+                " --dep process -Mtmux=src/tmux.zig -O ReleaseFast"
+                " -Mprocess=src/process.zig".split()
+                + [f"-femit-bin={binary}"],
                 cwd=ROOT,
                 check=True,
             )

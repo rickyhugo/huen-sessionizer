@@ -88,53 +88,50 @@ const Parser = struct {
     resolved_group: bool = false,
 
     fn fail(p: *Parser, comptime fmt: []const u8, args: anytype) anyerror {
-        p.message = std.fmt.allocPrint(p.a, fmt, args) catch return error.OutOfMemory;
+        p.message = try std.fmt.allocPrint(p.a, fmt, args);
         return error.InvalidArguments;
     }
     fn usageError(p: *Parser, text: []const u8) anyerror {
-        const usage = spec.usage(p.a, p.id) catch return error.OutOfMemory;
-        return p.fail("error: {s}\n\nUsage: {s}\n{s}", .{ text, usage, if (spec.isHelp(p.id)) "" else "\nFor more information, try '--help'.\n" });
+        return p.fail("error: {s}\n\nUsage: {s}\n{s}", .{ text, try spec.usage(p.a, p.id), if (spec.isHelp(p.id)) "" else "\nFor more information, try '--help'.\n" });
     }
     fn unexpected(p: *Parser, value: []const u8) anyerror {
-        const text = std.fmt.allocPrint(p.a, "unexpected argument '{s}' found{s}", .{ value, if (spec.get(p.id).positional != null and std.mem.startsWith(u8, value, "-")) std.fmt.allocPrint(p.a, "\n\n  tip: to pass '{s}' as a value, use '-- {s}'", .{ value, value }) catch return error.OutOfMemory else "" }) catch return error.OutOfMemory;
-        return p.usageError(text);
+        const tip = if (spec.get(p.id).positional != null and std.mem.startsWith(u8, value, "-")) try std.fmt.allocPrint(p.a, "\n\n  tip: to pass '{s}' as a value, use '-- {s}'", .{ value, value }) else "";
+        return p.usageError(try std.fmt.allocPrint(p.a, "unexpected argument '{s}' found{s}", .{ value, tip }));
     }
-    fn optionUsage(p: *Parser, suggested: ?spec.Option) ![]const u8 {
+    fn unexpectedLong(p: *Parser, name: []const u8) anyerror {
+        const options = try spec.allOptions(p.a, p.id);
+        const names = try p.a.alloc([]const u8, options.len);
+        for (options, names) |o, *long| long.* = o.long;
+        const similar = try suggestions.best(p.a, name, names);
         var labels: std.ArrayList([]const u8) = .empty;
-        for (spec.get(p.id).options) |o| {
+        for (options) |o| {
             if (p.id == .marks_delete and o.id == .all) continue;
-            if (p.flag(o.id) or (suggested != null and suggested.?.id == o.id)) try labels.append(p.a, try spec.label(p.a, o));
+            if (p.flag(o.id) or (similar != null and std.mem.eql(u8, o.long, similar.?))) try labels.append(p.a, try spec.label(p.a, o));
         }
-        if (suggested) |o| if (o.id == .help or o.id == .version) {
-            try labels.append(p.a, try spec.label(p.a, o));
-        };
-        if (labels.items.len == 0) return spec.usage(p.a, p.id);
         std.mem.sort([]const u8, labels.items, {}, struct {
             fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
                 return std.mem.lessThan(u8, lhs, rhs);
             }
         }.lessThan);
-        return std.fmt.allocPrint(p.a, "{s} {s}{s}", .{ try spec.invocation(p.a, p.id), try std.mem.join(p.a, " ", labels.items), try spec.positionalUsage(p.a, p.id) });
-    }
-    fn unexpectedLong(p: *Parser, name: []const u8) anyerror {
-        var names: std.ArrayList([]const u8) = .empty;
-        for (spec.get(p.id).options) |o| try names.append(p.a, o.long);
-        try names.append(p.a, spec.help_option.long);
-        if (p.id == .root) try names.append(p.a, spec.version_option.long);
-        const similar = try suggestions.best(p.a, name, names.items);
-        const suggested = if (similar) |long| spec.findOption(p.id, .{ .long = long }) else null;
+        const usage = if (labels.items.len == 0) try spec.usage(p.a, p.id) else try std.fmt.allocPrint(p.a, "{s} {s}{s}", .{ try spec.invocation(p.a, p.id), try std.mem.join(p.a, " ", labels.items), try spec.positionalUsage(p.a, p.id) });
         const hint = if (similar) |long|
             try std.fmt.allocPrint(p.a, "\n\n  tip: a similar argument exists: '--{s}'", .{long})
         else if (spec.get(p.id).positional != null)
             try std.fmt.allocPrint(p.a, "\n\n  tip: to pass '--{f}' as a value, use '-- --{f}'", .{ std.unicode.fmtUtf8(name), std.unicode.fmtUtf8(name) })
         else
             "";
-        return p.fail("error: unexpected argument '--{f}' found{s}\n\nUsage: {s}\n\nFor more information, try '--help'.\n", .{ std.unicode.fmtUtf8(name), hint, try p.optionUsage(suggested) });
+        return p.fail("error: unexpected argument '--{f}' found{s}\n\nUsage: {s}\n\nFor more information, try '--help'.\n", .{ std.unicode.fmtUtf8(name), hint, usage });
     }
     fn unexpectedValue(p: *Parser, o: spec.Option, value: []const u8) anyerror {
         // Attached flag errors include resolved argument groups, not a pending value.
-        const group = p.resolved_group or p.id == .marks_delete;
-        const suffix = if (group) try std.fmt.allocPrint(p.a, " {s}", .{try spec.argumentGroup(p.a, p.id)}) else try spec.positionalUsage(p.a, p.id);
+        const suffix = if (p.resolved_group or p.id == .marks_delete) blk: {
+            const s = spec.get(p.id);
+            var members: std.ArrayList([]const u8) = .empty;
+            if (!s.positional_last) if (s.positional) |name| try members.append(p.a, name);
+            for (s.options) |member| try members.append(p.a, try spec.label(p.a, member));
+            if (s.positional_last) if (s.positional) |name| try members.append(p.a, name);
+            break :blk try std.fmt.allocPrint(p.a, " <{s}>", .{try std.mem.join(p.a, "|", members.items)});
+        } else try spec.positionalUsage(p.a, p.id);
         const flag_usage = if (p.id == .marks_delete and o.id == .all) "" else try std.fmt.allocPrint(p.a, " --{s}", .{o.long});
         return p.fail("error: unexpected value '{f}' for '--{s}' found; no more were expected\n\nUsage: {s}{s}{s}\n\nFor more information, try '--help'.\n", .{ std.unicode.fmtUtf8(value), o.long, try spec.invocation(p.a, p.id), flag_usage, suffix });
     }
@@ -152,37 +149,32 @@ const Parser = struct {
             return p.fail("error: invalid value '{s}' for '{s}': {s}\n\nFor more information, try '--help'.\n", .{ value, label, reason });
         };
     }
-    fn validate(p: *Parser, o: spec.Option, value: []const u8) !void {
-        // Clap's possible-value parser reports lossy text; other values require UTF-8.
-        if (spec.values(o.kind).len == 0) try p.validateUtf8(value);
-        const label = try spec.label(p.a, o);
-        if (o.kind == .uints) {
-            _ = try p.number(value, label);
-        } else if (o.kind == .color) {
-            _ = config.parseColor(value) catch return p.fail("error: invalid value '{s}' for '{s}': Failed to parse Colors\n\nFor more information, try '--help'.\n", .{ value, label });
-        } else {
-            const possible = spec.values(o.kind);
-            if (possible.len == 0) return;
-            for (possible) |candidate| if (std.mem.eql(u8, value, candidate)) return;
-            const similar = try suggestions.best(p.a, value, possible);
-            return p.fail("error: invalid value '{f}' for '{s}'\n  [possible values: {s}]\n{s}\nFor more information, try '--help'.\n", .{
-                std.unicode.fmtUtf8(value),                                                                             label, try std.mem.join(p.a, ", ", possible),
-                if (similar) |s| try std.fmt.allocPrint(p.a, "\n  tip: a similar value exists: '{s}'\n", .{s}) else "",
-            });
-        }
-    }
     fn store(p: *Parser, o: spec.Option, values: []const []const u8) !void {
         const previous = p.values.get(o.id);
-        if (previous != null and !o.many()) return p.usageError(try std.fmt.allocPrint(p.a, "the argument '{s}' cannot be used multiple times", .{try spec.label(p.a, o)}));
-        for (values) |value| try p.validate(o, value);
+        const label = try spec.label(p.a, o);
+        if (previous != null and !o.many()) return p.usageError(try std.fmt.allocPrint(p.a, "the argument '{s}' cannot be used multiple times", .{label}));
+        const possible = spec.values(o.kind);
+        for (values) |value| {
+            // Clap's possible-value parser reports lossy text; other values require UTF-8.
+            if (possible.len != 0) {
+                for (possible) |candidate| {
+                    if (std.mem.eql(u8, value, candidate)) break;
+                } else {
+                    const tip = if (try suggestions.best(p.a, value, possible)) |similar| try std.fmt.allocPrint(p.a, "\n  tip: a similar value exists: '{s}'\n", .{similar}) else "";
+                    return p.fail("error: invalid value '{f}' for '{s}'\n  [possible values: {s}]\n{s}\nFor more information, try '--help'.\n", .{ std.unicode.fmtUtf8(value), label, try std.mem.join(p.a, ", ", possible), tip });
+                }
+                continue;
+            }
+            try p.validateUtf8(value);
+            if (o.kind == .uints) _ = try p.number(value, label);
+            if (o.kind == .color) _ = config.parseColor(value) catch return p.fail("error: invalid value '{s}' for '{s}': Failed to parse Colors\n\nFor more information, try '--help'.\n", .{ value, label });
+        }
         p.values.set(o.id, if (previous) |v| try std.mem.concat(p.a, []const u8, &.{ v, values }) else values);
         if (p.first_option == null) p.first_option = o;
         if (o.kind == .flag) p.resolved_group = true else p.pending_group = true;
     }
     fn one(p: *Parser, id: spec.OptionId) ?[]const u8 {
-        const vals = p.values.get(id) orelse return null;
-        if (vals.len == 0) return null;
-        return vals[0];
+        return if (p.values.get(id)) |v| v[0] else null;
     }
     fn flag(p: *Parser, id: spec.OptionId) bool {
         return p.values.get(id) != null;
@@ -200,12 +192,13 @@ const Parser = struct {
                 continue;
             }
             if (!literal and arg.len > 1 and arg[0] == '-') {
-                var cursor: usize = 1;
                 const long = arg[1] == '-';
-                while (cursor < arg.len) {
-                    const eq = if (long) std.mem.indexOfScalar(u8, arg, '=') else null;
-                    const o = spec.findOption(p.id, if (long) .{ .long = arg[2 .. eq orelse arg.len] } else .{ .short = arg[cursor] });
-                    const selected = o orelse return if (long) p.unexpectedLong(arg[2 .. eq orelse arg.len]) else p.unexpected(try std.fmt.allocPrint(p.a, "-{c}", .{arg[cursor]}));
+                const eq = if (long) std.mem.indexOfScalar(u8, arg, '=') else null;
+                const name = arg[2 .. eq orelse arg.len];
+                var cursor: usize = 1;
+                while (cursor < arg.len) : (cursor += 1) {
+                    const selected = spec.findOption(p.id, if (long) .{ .long = name } else .{ .short = arg[cursor] }) orelse
+                        return if (long) p.unexpectedLong(name) else p.unexpected(try std.fmt.allocPrint(p.a, "-{c}", .{arg[cursor]}));
                     if (eq) |n| if (selected.kind == .flag) return p.unexpectedValue(selected, arg[n + 1 ..]);
                     if (p.pending_group) {
                         p.resolved_group = true;
@@ -214,43 +207,35 @@ const Parser = struct {
                     if (selected.id == .help) return .{ .help = try spec.path(p.a, p.id) };
                     if (selected.id == .version) return .version;
                     if (selected.kind == .flag) {
-                        if (eq != null) return p.unexpected(arg);
                         try p.store(selected, &.{});
                         if (long) break;
-                        cursor += 1;
                         continue;
                     }
                     var vals: std.ArrayList([]const u8) = .empty;
                     const attached = if (long) if (eq) |n| arg[n + 1 ..] else null else if (cursor + 1 < arg.len) arg[cursor + 1 + @intFromBool(arg[cursor + 1] == '=') ..] else null;
                     if (attached) |v| try vals.append(p.a, v);
-                    if (attached == null or selected.many()) {
-                        while (i + 1 < p.args.len) {
-                            const next = p.args[i + 1];
-                            if (next.len > 1 and next[0] == '-') {
-                                if (vals.items.len == 0) {
-                                    if (std.mem.eql(u8, next, "--")) {
-                                        if (p.id == .config and i + 2 < p.args.len) {
-                                            const command = p.args[i + 2];
-                                            if (p.first_option) |first| return p.usageError(try std.fmt.allocPrint(p.a, "the subcommand '{s}' cannot be used with '{s}'", .{ command, try spec.label(p.a, first) }));
-                                            return p.usageError(try std.fmt.allocPrint(p.a, "the subcommand '{s}' cannot be used with one or more of the other specified arguments", .{command}));
-                                        }
-                                    } else if (std.mem.startsWith(u8, next, "--")) {
-                                        const next_eq = std.mem.indexOfScalar(u8, next, '=');
-                                        const name = next[2 .. next_eq orelse next.len];
-                                        const next_option = spec.findOption(p.id, .{ .long = name }) orelse return p.unexpectedLong(name);
-                                        if (next_eq) |n| if (next_option.kind == .flag) return p.unexpectedValue(next_option, next[n + 1 ..]);
-                                    } else if (spec.findOption(p.id, .{ .short = next[1] }) == null) {
-                                        return p.unexpected(try std.fmt.allocPrint(p.a, "-{c}", .{next[1]}));
-                                    }
-                                }
-                                break;
-                            }
-                            if (vals.items.len != 0 and !selected.many()) break;
-                            i += 1;
-                            try vals.append(p.a, next);
-                        }
-                    }
+                    if (attached == null or selected.many()) while (i + 1 < p.args.len) : (i += 1) {
+                        const next = p.args[i + 1];
+                        if ((next.len > 1 and next[0] == '-') or (vals.items.len != 0 and !selected.many())) break;
+                        try vals.append(p.a, next);
+                    };
                     if (vals.items.len == 0) {
+                        // Clap reports an invalid following argument before the missing value.
+                        const next = if (i + 1 < p.args.len) p.args[i + 1] else "";
+                        if (std.mem.eql(u8, next, "--")) {
+                            if (p.id == .config and i + 2 < p.args.len) {
+                                const command = p.args[i + 2];
+                                if (p.first_option) |first| return p.usageError(try std.fmt.allocPrint(p.a, "the subcommand '{s}' cannot be used with '{s}'", .{ command, try spec.label(p.a, first) }));
+                                return p.usageError(try std.fmt.allocPrint(p.a, "the subcommand '{s}' cannot be used with one or more of the other specified arguments", .{command}));
+                            }
+                        } else if (std.mem.startsWith(u8, next, "--")) {
+                            const next_eq = std.mem.indexOfScalar(u8, next, '=');
+                            const next_name = next[2 .. next_eq orelse next.len];
+                            const next_option = spec.findOption(p.id, .{ .long = next_name }) orelse return p.unexpectedLong(next_name);
+                            if (next_eq) |n| if (next_option.kind == .flag) return p.unexpectedValue(next_option, next[n + 1 ..]);
+                        } else if (next.len > 1 and spec.findOption(p.id, .{ .short = next[1] }) == null) {
+                            return p.unexpected(try std.fmt.allocPrint(p.a, "-{c}", .{next[1]}));
+                        }
                         const possible = spec.values(selected.kind);
                         return p.fail("error: a value is required for '{s}' but none was supplied{s}\n\nFor more information, try '--help'.\n", .{ try spec.label(p.a, selected), if (possible.len == 0) "" else try std.fmt.allocPrint(p.a, "\n  [possible values: {s}]", .{try std.mem.join(p.a, ", ", possible)}) });
                     }
@@ -293,7 +278,31 @@ const Parser = struct {
         if (p.id == .marks_delete and p.positional != null and p.flag(.all)) return p.usageError("the argument '[INDEX]' cannot be used with '--all'");
         return switch (p.id) {
             .root => .pick,
-            .config => .{ .config = .{ .edit = try p.settings() } },
+            .config => blk: {
+                var edit: config.SettingsEdit = .{
+                    .paths = p.values.get(.paths),
+                    .default_session = p.one(.session),
+                    .excluded = p.values.get(.excluded),
+                    .remove = p.values.get(.remove),
+                    .display_full_path = p.boolean(.full_path),
+                    .search_submodules = p.boolean(.search_submodules),
+                    .recursive_submodules = p.boolean(.recursive_submodules),
+                    .switch_filter_unknown = p.boolean(.switch_filter_unknown),
+                    .list_worktrees = p.boolean(.enable_list_worktrees),
+                };
+                if (p.values.get(.max_depths)) |values| {
+                    const depths = try p.a.alloc(usize, values.len);
+                    for (values, depths) |v, *depth| depth.* = try config.parseIndex(v);
+                    edit.max_depths = depths;
+                }
+                inline for (.{ "highlight_color", "highlight_text_color", "border_color", "info_color", "prompt_color" }, .{ spec.OptionId.picker_highlight_color, .picker_highlight_text_color, .picker_border_color, .picker_info_color, .picker_prompt_color }) |field, id| if (p.one(id)) |value| {
+                    if (edit.picker_colors == null) edit.picker_colors = .{};
+                    @field(edit.picker_colors.?, field) = try config.parseColor(value);
+                };
+                if (p.one(.session_sort_order)) |value| edit.session_sort_order = if (std.mem.eql(u8, value, "Alphabetical")) .alphabetical else .last_attached;
+                if (p.one(.clone_repo_switch)) |value| edit.clone_repo_switch = if (std.mem.eql(u8, value, "Always")) .always else if (std.mem.eql(u8, value, "Never")) .never else .foreground;
+                break :blk .{ .config = .{ .edit = edit } };
+            },
             .config_list => .{ .config = .{ .list = .{ .defaults = p.flag(.defaults) } } },
             .start => .start,
             .switch_session => .switch_session,
@@ -313,36 +322,6 @@ const Parser = struct {
             .marks_delete => .{ .marks = if (p.flag(.all)) .clear else .{ .delete = try config.parseIndex(p.positional.?) } },
             .help, .config_help, .marks_help => .{ .help = try spec.path(p.a, p.id) },
         };
-    }
-    fn settings(p: *Parser) !config.SettingsEdit {
-        var result: config.SettingsEdit = .{
-            .paths = p.values.get(.paths),
-            .default_session = p.one(.session),
-            .excluded = p.values.get(.excluded),
-            .remove = p.values.get(.remove),
-            .display_full_path = p.boolean(.full_path),
-            .search_submodules = p.boolean(.search_submodules),
-            .recursive_submodules = p.boolean(.recursive_submodules),
-            .switch_filter_unknown = p.boolean(.switch_filter_unknown),
-            .list_worktrees = p.boolean(.enable_list_worktrees),
-        };
-        if (p.values.get(.max_depths)) |values| {
-            const depths = try p.a.alloc(usize, values.len);
-            for (values, depths) |v, *depth| depth.* = try config.parseIndex(v);
-            result.max_depths = depths;
-        }
-        var colors: config.PickerColors = .{};
-        var has_colors = false;
-        inline for (.{ "highlight_color", "highlight_text_color", "border_color", "info_color", "prompt_color" }, .{ spec.OptionId.picker_highlight_color, .picker_highlight_text_color, .picker_border_color, .picker_info_color, .picker_prompt_color }) |field, id| {
-            if (p.one(id)) |value| {
-                @field(colors, field) = try config.parseColor(value);
-                has_colors = true;
-            }
-        }
-        if (has_colors) result.picker_colors = colors;
-        if (p.one(.session_sort_order)) |value| result.session_sort_order = if (std.mem.eql(u8, value, "Alphabetical")) .alphabetical else .last_attached;
-        if (p.one(.clone_repo_switch)) |value| result.clone_repo_switch = if (std.mem.eql(u8, value, "Always")) .always else if (std.mem.eql(u8, value, "Never")) .never else .foreground;
-        return result;
     }
 };
 

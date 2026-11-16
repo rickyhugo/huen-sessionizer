@@ -170,16 +170,7 @@ class TerminalTests(unittest.TestCase):
                 "printf 'CLEANUP_READY\\n'; exec /bin/sh",
             )
             terminal = driver.Terminal(
-                [
-                    fixture.real_tmux,
-                    "-L",
-                    fixture.socket,
-                    "-f",
-                    os.devnull,
-                    "attach-session",
-                    "-t",
-                    "cleanup",
-                ],
+                [*fixture.tmux_command, "attach-session", "-t", "cleanup"],
                 fixture.env,
                 fixture.home,
             )

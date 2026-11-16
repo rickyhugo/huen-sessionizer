@@ -41,11 +41,9 @@ pub fn configBare(bytes: []const u8) error{UnsupportedGitConfig}!?bool {
                 if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.') return error.UnsupportedGitConfig;
             }
             const subsection = std.mem.trim(u8, section[split..], " \t");
-            if (subsection.len > 0) {
-                if (subsection.len < 2 or subsection[0] != '"' or subsection[subsection.len - 1] != '"' or
-                    std.mem.indexOfScalar(u8, subsection[1 .. subsection.len - 1], '"') != null)
-                    return error.UnsupportedGitConfig;
-            }
+            if (subsection.len > 0 and (subsection.len < 2 or subsection[0] != '"' or subsection[subsection.len - 1] != '"' or
+                std.mem.indexOfScalar(u8, subsection[1 .. subsection.len - 1], '"') != null))
+                return error.UnsupportedGitConfig;
             core = std.ascii.eqlIgnoreCase(section, "core");
             section_seen = true;
             continue;
@@ -58,26 +56,25 @@ pub fn configBare(bytes: []const u8) error{UnsupportedGitConfig}!?bool {
             if (!std.ascii.isAlphanumeric(c) and c != '-') return error.UnsupportedGitConfig;
         }
         if (!core or !std.ascii.eqlIgnoreCase(key, "bare")) continue;
-        if (equal) |i| {
-            var value = std.mem.trim(u8, text[i + 1 ..], " \t");
-            if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-            if (value.len == 0 or std.ascii.eqlIgnoreCase(value, "false") or
-                std.ascii.eqlIgnoreCase(value, "no") or std.ascii.eqlIgnoreCase(value, "off"))
-            {
-                result = false;
-            } else if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "yes") or std.ascii.eqlIgnoreCase(value, "on")) {
-                result = true;
-            } else {
-                const digits = if (value[0] == '+' or value[0] == '-') value[1..] else value;
-                if (digits.len > 1 and digits[0] == '0') return error.UnsupportedGitConfig;
-                for (digits) |c| {
-                    if (!std.ascii.isDigit(c)) return error.UnsupportedGitConfig;
-                }
-                const number = std.fmt.parseInt(i32, value, 10) catch return error.UnsupportedGitConfig;
-                result = number != 0;
-            }
-        } else {
+        const i = equal orelse {
             result = true;
+            continue;
+        };
+        var value = std.mem.trim(u8, text[i + 1 ..], " \t");
+        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
+        if (value.len == 0 or std.ascii.eqlIgnoreCase(value, "false") or
+            std.ascii.eqlIgnoreCase(value, "no") or std.ascii.eqlIgnoreCase(value, "off"))
+        {
+            result = false;
+        } else if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "yes") or std.ascii.eqlIgnoreCase(value, "on")) {
+            result = true;
+        } else {
+            const digits = if (value[0] == '+' or value[0] == '-') value[1..] else value;
+            if (digits.len > 1 and digits[0] == '0') return error.UnsupportedGitConfig;
+            for (digits) |c| {
+                if (!std.ascii.isDigit(c)) return error.UnsupportedGitConfig;
+            }
+            result = (std.fmt.parseInt(i32, value, 10) catch return error.UnsupportedGitConfig) != 0;
         }
     }
     return result;
@@ -120,12 +117,6 @@ test "bare config delegates complex values and malformed syntax to Git" {
     }
 }
 
-pub fn boolean(text: []const u8) !bool {
-    if (std.mem.eql(u8, text, "true")) return true;
-    if (std.mem.eql(u8, text, "false")) return false;
-    return error.InvalidBoolean;
-}
-
 pub fn gitdir(a: A, base: []const u8, bytes: []const u8) ![]const u8 {
     if (!std.mem.startsWith(u8, bytes, "gitdir: ")) return error.InvalidGitdir;
     const path = std.mem.trimEnd(u8, bytes["gitdir: ".len..], std.ascii.whitespace[0..]);
@@ -136,11 +127,8 @@ pub fn gitdir(a: A, base: []const u8, bytes: []const u8) ![]const u8 {
 pub fn worktreePath(a: A, pointer: []const u8, bytes: []const u8) ![]const u8 {
     const path = std.mem.trimEnd(u8, bytes, std.ascii.whitespace[0..]);
     if (path.len == 0) return error.InvalidGitdir;
-    const absolute = try std.fs.path.resolve(a, &.{ std.fs.path.dirname(pointer) orelse ".", path });
-    return if (std.mem.eql(u8, std.fs.path.basename(absolute), ".git"))
-        std.fs.path.dirname(absolute) orelse absolute
-    else
-        absolute;
+    const absolute = try std.fs.path.resolve(a, &.{ std.fs.path.dirname(pointer).?, path });
+    return if (std.mem.eql(u8, std.fs.path.basename(absolute), ".git")) std.fs.path.dirname(absolute).? else absolute;
 }
 
 pub const Module = struct { name: []const u8, path: []const u8 };
@@ -170,33 +158,28 @@ pub fn submoduleEntries(a: A, bytes: []const u8) ![]const Module {
         if (!duplicate) try modules.append(a, module);
     }
     var count: usize = 0;
-    for (modules.items) |module| {
-        if (!validModule(module)) continue;
+    valid: for (modules.items) |module| {
+        if (module.name.len == 0 or module.path.len == 0 or std.fs.path.isAbsolute(module.path)) continue;
+        var names = std.mem.tokenizeAny(u8, module.name, "/\\");
+        while (names.next()) |component| {
+            if (std.mem.eql(u8, component, "..")) continue :valid;
+        }
+        var paths = std.mem.tokenizeScalar(u8, module.path, '/');
+        var depth: usize = 0;
+        while (paths.next()) |component| {
+            if (std.mem.eql(u8, component, ".")) continue;
+            if (std.mem.eql(u8, component, "..")) {
+                if (depth == 0) continue :valid;
+                depth -= 1;
+            } else {
+                depth += 1;
+            }
+        }
         modules.items[count] = module;
         count += 1;
     }
     modules.shrinkRetainingCapacity(count);
     return modules.toOwnedSlice(a);
-}
-
-fn validModule(module: Module) bool {
-    if (module.name.len == 0 or module.path.len == 0 or std.fs.path.isAbsolute(module.path)) return false;
-    var names = std.mem.tokenizeAny(u8, module.name, "/\\");
-    while (names.next()) |component| {
-        if (std.mem.eql(u8, component, "..")) return false;
-    }
-    var paths = std.mem.tokenizeScalar(u8, module.path, '/');
-    var depth: usize = 0;
-    while (paths.next()) |component| {
-        if (std.mem.eql(u8, component, ".")) continue;
-        if (std.mem.eql(u8, component, "..")) {
-            if (depth == 0) return false;
-            depth -= 1;
-        } else {
-            depth += 1;
-        }
-    }
-    return true;
 }
 
 pub fn workspaceStore(a: A, bytes: []const u8) ![]const Worktree {

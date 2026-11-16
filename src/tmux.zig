@@ -27,13 +27,6 @@ fn snapshotText(a: A, text: []const u8, literal: bool) ![]const u8 {
         trimmed;
 }
 
-pub fn succeeded(term: std.process.Child.Term) bool {
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-}
-
 pub const Client = struct {
     socket: []const u8,
     inside_tmux: bool,
@@ -51,8 +44,7 @@ pub const Client = struct {
     }
 
     pub fn listingSnapshot(self: *const Client, io: Io, a: A) anyerror!Snapshot {
-        // Listing uses literal names. Other commands retain Rust's historical
-        // apostrophe stripping through snapshot().
+        // Other commands keep Rust's historical apostrophe stripping via snapshot().
         return self.readSnapshot(io, a, true);
     }
 
@@ -108,7 +100,7 @@ pub const Client = struct {
 
     pub fn capture(self: *const Client, io: Io, a: A, target: []const u8) anyerror![]const u8 {
         const output = try self.execute(io, a, &.{ "capture-pane", "-ep", "-t", target });
-        return if (succeeded(output.term)) output.stdout else "";
+        return if (output.term.success()) output.stdout else "";
     }
 
     pub fn attachedSession(self: *const Client, io: Io, a: A) anyerror![]const u8 {
@@ -153,13 +145,11 @@ pub const Client = struct {
     }
     pub fn switchClient(self: *const Client, io: Io, a: A, name: []const u8) anyerror!Output {
         const output = try self.execute(io, a, &.{ "switch-client", "-t", name });
-        if (!succeeded(output.term)) return self.execute(io, a, &.{ "attach-session", "-t", name });
-        return output;
+        return if (output.term.success()) output else self.execute(io, a, &.{ "attach-session", "-t", name });
     }
     pub fn switchTo(self: *const Client, io: Io, a: A, name: []const u8) anyerror!void {
         if (!self.inside_tmux) try self.attach(io, a, name, null);
-        const output = try self.switchClient(io, a, name);
-        if (!succeeded(output.term)) try self.attach(io, a, name, null);
+        if (!(try self.switchClient(io, a, name)).term.success()) try self.attach(io, a, name, null);
     }
     pub fn attach(self: *const Client, io: Io, a: A, name: ?[]const u8, path: ?[]const u8) anyerror!noreturn {
         var args: std.ArrayList([]const u8) = .empty;

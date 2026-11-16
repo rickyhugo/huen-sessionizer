@@ -149,7 +149,6 @@ pub const Edit = union(enum) {
     clear_marks,
 };
 pub const Diagnostic = struct { text: []const u8, exit_code: u8 = 1 };
-pub const LoadResult = union(enum) { config: Config, diagnostic: Diagnostic };
 pub threadlocal var failure: ?Diagnostic = null;
 
 pub fn load(io: Io, a: A, env: *const Env) anyerror!Config {
@@ -161,15 +160,7 @@ pub fn load(io: Io, a: A, env: *const Env) anyerror!Config {
     };
 }
 
-pub fn loadDetailed(io: Io, a: A, env: *const Env) !LoadResult {
-    const config = load(io, a, env) catch |err| {
-        if (err == error.OutOfMemory or err == error.Canceled) return err;
-        return .{ .diagnostic = failure.? };
-    };
-    return .{ .config = config };
-}
-
-fn loadInternal(io: Io, a: A, env: *const Env, diagnostic: ?*?[]const u8) anyerror!Config {
+fn loadInternal(io: Io, a: A, env: *const Env, diagnostic: *?[]const u8) anyerror!Config {
     var tree: toml.Value = .{ .table = .empty };
     var source: []const u8 = "";
     if (env.get("TMS_CONFIG_FILE")) |path| {
@@ -181,21 +172,18 @@ fn loadInternal(io: Io, a: A, env: *const Env, diagnostic: ?*?[]const u8) anyerr
         }
     } else {
         const home = try homeDir(a, env);
-        const platform = try platformDir(a, env);
-        if (home == null and platform == null) return error.NoConfigLocation;
+        const platform = try platformDir(a, env) orelse return error.NoConfigLocation;
         if (home) |h| {
             source = try std.fs.path.join(a, &.{ h, ".config/tms/config.toml" });
             _ = try loadFile(io, a, &tree, source, diagnostic);
         }
-        if (platform) |p| {
-            source = try std.fs.path.join(a, &.{ p, "tms/config.toml" });
-            _ = try loadFile(io, a, &tree, source, diagnostic);
-        }
+        source = try std.fs.path.join(a, &.{ platform, "tms/config.toml" });
+        _ = try loadFile(io, a, &tree, source, diagnostic);
     }
     var config: Config = .{};
     inline for (comptime std.meta.fieldNames(Config), comptime std.meta.fieldTypes(Config)) |name, T| {
         if (tree.table.get(name)) |v| @field(config, name) = toml.decode(T, a, v) catch |err| {
-            if (diagnostic) |d| d.* = try std.fmt.allocPrint(a, "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not deserialize configuration\n╰─▶ {s}\n", .{try toml.explain(T, a, v, name, try sourceName(io, a, source))});
+            diagnostic.* = try std.fmt.allocPrint(a, "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not deserialize configuration\n╰─▶ {s}\n", .{try toml.explain(T, a, v, name, try sourceName(io, a, source))});
             return err;
         };
     }
@@ -207,13 +195,11 @@ pub fn commit(io: Io, a: A, env: *const Env, cfg: *Config, edit: Edit) anyerror!
         .settings => |settings| {
             if (settings.paths) |paths| {
                 const dirs = try a.alloc(SearchDirectory, paths.len);
-                for (paths, dirs, 0..) |path, *dir, i| {
-                    const trimmed = if (std.mem.endsWith(u8, path, "/")) path[0 .. path.len - 1] else path;
-                    dir.* = .{
-                        .path = try canonical(io, a, env, trimmed),
-                        .depth = if (settings.max_depths) |depths| if (i < depths.len) depths[i] else 10 else 10,
-                    };
-                }
+                const depths = settings.max_depths orelse &.{};
+                for (paths, dirs, 0..) |path, *dir, i| dir.* = .{
+                    .path = try canonical(io, a, env, if (std.mem.endsWith(u8, path, "/")) path[0 .. path.len - 1] else path),
+                    .depth = if (i < depths.len) depths[i] else 10,
+                };
                 cfg.search_dirs = dirs;
             }
             if (settings.default_session) |name| {
@@ -236,36 +222,23 @@ pub fn commit(io: Io, a: A, env: *const Env, cfg: *Config, edit: Edit) anyerror!
                 const current = cfg.excluded_dirs orelse return error.RemoveWithoutExclusions;
                 var kept: std.ArrayList([]const u8) = .empty;
                 for (current) |item| {
-                    var removed = false;
-                    for (remove) |r| if (std.mem.eql(u8, item, r)) {
-                        removed = true;
-                        break;
-                    };
-                    if (!removed) try kept.append(a, item);
+                    for (remove) |r| {
+                        if (std.mem.eql(u8, item, r)) break;
+                    } else try kept.append(a, item);
                 }
                 cfg.excluded_dirs = try kept.toOwnedSlice(a);
             }
         },
         .add_bookmark => |path| {
             const items = cfg.bookmarks orelse &.{};
-            var found = false;
-            for (items) |item| if (std.mem.eql(u8, item, path)) {
-                found = true;
-                break;
-            };
-            if (!found) cfg.bookmarks = try std.mem.concat(a, []const u8, &.{ items, &.{path} });
-        },
-        .delete_bookmark => |path| if (cfg.bookmarks) |items| {
-            var kept: std.ArrayList([]const u8) = .empty;
-            var removed = false;
             for (items) |item| {
-                if (!removed and std.mem.eql(u8, item, path)) {
-                    removed = true;
-                    continue;
-                }
-                try kept.append(a, item);
-            }
-            cfg.bookmarks = try kept.toOwnedSlice(a);
+                if (std.mem.eql(u8, item, path)) break;
+            } else cfg.bookmarks = try std.mem.concat(a, []const u8, &.{ items, &.{path} });
+        },
+        .delete_bookmark => |path| if (cfg.bookmarks) |items| for (items, 0..) |item, i| {
+            if (!std.mem.eql(u8, item, path)) continue;
+            cfg.bookmarks = try std.mem.concat(a, []const u8, &.{ items[0..i], items[i + 1 ..] });
+            break;
         },
         .set_mark => |mark| {
             const index = mark.index orelse blk: {
@@ -285,11 +258,8 @@ pub fn commit(io: Io, a: A, env: *const Env, cfg: *Config, edit: Edit) anyerror!
         },
         .clear_marks => cfg.marks = null,
     }
-    const path = env.get("TMS_CONFIG_FILE") orelse blk: {
-        if (try platformDir(a, env)) |p| break :blk try std.fs.path.join(a, &.{ p, "tms/config.toml" });
-        if (try homeDir(a, env)) |h| break :blk try std.fs.path.join(a, &.{ h, ".config/tms/config.toml" });
-        return error.NoConfigLocation;
-    };
+    const path = env.get("TMS_CONFIG_FILE") orelse
+        try std.fs.path.join(a, &.{ try platformDir(a, env) orelse return error.NoConfigLocation, "tms/config.toml" });
     const text = toml.encode(a, cfg.*) catch |err| switch (err) {
         error.ConfigIntegerOutOfRange => return error.ConfigSerializationOutOfRange,
         else => return err,
@@ -392,58 +362,46 @@ pub fn expandPath(io: Io, a: A, env: *const Env, path: []const u8) anyerror![]co
             i += 1;
             continue;
         }
-        if (i < path.len and path[i] == '{') {
-            if (std.mem.indexOfScalarPos(u8, path, i + 1, '}')) |end| {
-                const expression = path[i + 1 .. end];
-                const split = std.mem.indexOf(u8, expression, ":-");
-                const fallback = if (split) |n| if (n != 0) expression[n + 2 ..] else null else null;
-                const name = if (fallback != null) expression[0..split.?] else expression;
-                const value = env.get(name) orelse fallback orelse return error.MissingEnvironmentVariable;
-                if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEnvironmentVariable;
-                try out.writer.writeAll(value);
-                i = end + 1;
+        var fallback: ?[]const u8 = null;
+        const name = if (i < path.len and path[i] == '{') braced: {
+            const end = std.mem.indexOfScalarPos(u8, path, i + 1, '}') orelse {
+                try out.writer.writeAll("${");
+                i += 1;
+                continue;
+            };
+            const expression = path[i + 1 .. end];
+            i = end + 1;
+            const split = std.mem.indexOf(u8, expression, ":-") orelse break :braced expression;
+            if (split == 0) break :braced expression;
+            fallback = expression[split + 2 ..];
+            break :braced expression[0..split];
+        } else bare: {
+            const start = i;
+            while (i < path.len) {
+                const size = try std.unicode.utf8ByteSequenceLength(path[i]);
+                const scalar = try std.unicode.utf8Decode(path[i .. i + size]);
+                if (scalar != '_' and std.sort.binarySearch([2]u21, &unicode.ranges, scalar, struct {
+                    fn order(needle: u21, range: [2]u21) std.math.Order {
+                        return if (needle < range[0]) .lt else if (needle > range[1]) .gt else .eq;
+                    }
+                }.order) == null) break;
+                i += size;
+            }
+            if (i == start) {
+                try out.writer.writeByte('$');
                 continue;
             }
-            try out.writer.writeAll("${");
-            i += 1;
-            continue;
-        }
-        const start = i;
-        while (i < path.len) {
-            const size = try std.unicode.utf8ByteSequenceLength(path[i]);
-            const scalar = try std.unicode.utf8Decode(path[i .. i + size]);
-            if (!variableCharacter(scalar)) break;
-            i += size;
-        }
-        if (i == start) {
-            try out.writer.writeByte('$');
-        } else {
-            const value = env.get(path[start..i]) orelse return error.MissingEnvironmentVariable;
-            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEnvironmentVariable;
-            try out.writer.writeAll(value);
-        }
+            break :bare path[start..i];
+        };
+        const value = env.get(name) orelse fallback orelse return error.MissingEnvironmentVariable;
+        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEnvironmentVariable;
+        try out.writer.writeAll(value);
     }
     const expanded = try out.toOwnedSlice();
     if (path.len > 0 and path[0] == '~' and expanded.len > 0 and expanded[0] == '~' and (expanded.len == 1 or expanded[1] == '/')) {
         if (try homeDir(a, env)) |home| return std.mem.concat(a, u8, &.{ home, expanded[1..] });
     }
     return expanded;
-}
-
-fn variableCharacter(scalar: u21) bool {
-    if (scalar == '_') return true;
-    var low: usize = 0;
-    var high: usize = unicode.ranges.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        const range = unicode.ranges[mid];
-        if (scalar < range[0]) {
-            high = mid;
-        } else if (scalar > range[1]) {
-            low = mid + 1;
-        } else return true;
-    }
-    return false;
 }
 
 pub fn setBinding(a: A, bindings: *std.ArrayList(Binding), binding: Binding) !void {
@@ -592,7 +550,7 @@ fn platformDir(a: A, env: *const Env) !?[]const u8 {
     return null;
 }
 
-fn loadFile(io: Io, a: A, tree: *toml.Value, path: []const u8, diagnostic: ?*?[]const u8) !bool {
+fn loadFile(io: Io, a: A, tree: *toml.Value, path: []const u8, diagnostic: *?[]const u8) !bool {
     const stat = Io.Dir.cwd().statFile(io, path, .{}) catch return false;
     if (stat.kind != .file) return false;
     // Optional config sources ignore existing files with unregistered extensions.
@@ -609,7 +567,7 @@ fn loadFile(io: Io, a: A, tree: *toml.Value, path: []const u8, diagnostic: ?*?[]
     const text = try utf8Lossy(a, if (std.mem.startsWith(u8, bytes, "\xef\xbb\xbf")) bytes[3..] else bytes);
     var message: ?[]const u8 = null;
     const parsed = toml.parseDetailed(a, text, &message) catch |err| {
-        if (diagnostic) |d| d.* = try std.fmt.allocPrint(a, "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not parse configuration\n╰─▶ {s} in {s}\n", .{ message orelse @errorName(err), try sourceName(io, a, path) });
+        diagnostic.* = try std.fmt.allocPrint(a, "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not parse configuration\n╰─▶ {s} in {s}\n", .{ message orelse @errorName(err), try sourceName(io, a, path) });
         return err;
     };
     try toml.merge(a, tree, parsed);
@@ -992,14 +950,13 @@ test "load diagnostics preserve enum representation, variant, and indexed keys" 
         .{ .text = "session_sort_order = {Bad = [], Wrong = []}", .expected = "value of enum SessionSortOrderConfig should be represented by either string or table with exactly one key for key `session_sort_order`" },
     }) |case| {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = case.text });
-        const result = try loadDetailed(io, a, &env);
-        try std.testing.expect(result == .diagnostic);
-        try std.testing.expectEqual(@as(u8, 1), result.diagnostic.exit_code);
+        try std.testing.expectError(error.InvalidConfigEnum, load(io, a, &env));
+        try std.testing.expectEqual(@as(u8, 1), failure.?.exit_code);
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(
             a,
             "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not deserialize configuration\n╰─▶ {s}\n",
             .{case.expected},
-        ), result.diagnostic.text);
+        ), failure.?.text);
     }
 }
 
@@ -1071,12 +1028,11 @@ test "load diagnostics describe short sequence structs and their nested keys" {
         .{ .text = "session_configs = {a = []}", .expected = "invalid length 0, expected struct SessionConfig with 1 element for key `session_configs.a`" },
     }) |case| {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = case.text });
-        const result = try loadDetailed(io, a, &env);
-        try std.testing.expect(result == .diagnostic);
+        try std.testing.expectError(error.InvalidConfigType, load(io, a, &env));
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(
             a,
             "Error: Config Error\n├─▶ Could not load configuration\n│   ╰╴Could not deserialize configuration\n╰─▶ {s}\n",
             .{case.expected},
-        ), result.diagnostic.text);
+        ), failure.?.text);
     }
 }

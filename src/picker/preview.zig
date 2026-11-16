@@ -1,20 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const Preview = @import("../picker.zig").Preview;
 const Locale = opaque {};
 extern "c" fn newlocale(c_int, [*:0]const u8, ?*Locale) ?*Locale;
 extern "c" fn freelocale(*Locale) void;
 extern "c" fn strcoll_l([*:0]const u8, [*:0]const u8, *Locale) c_int;
 
-pub fn read(io: std.Io, a: std.mem.Allocator, request: Preview) ![]const u8 {
-    return switch (request) {
-        .none => "",
-        .pane => |pane| try pane.client.capture(io, a, pane.target),
-        .directory => |path| try directory(io, a, path),
-    };
-}
-
-fn directory(io: std.Io, a: std.mem.Allocator, path: []const u8) ![]const u8 {
+pub fn directory(io: std.Io, a: std.mem.Allocator, path: []const u8) ![]const u8 {
     var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     var names: std.ArrayList([:0]const u8) = .empty;

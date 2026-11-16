@@ -32,19 +32,14 @@ pub fn discover(io: Io, a: A, search: Search) anyerror![]const RepoRef {
     try queue.appendSlice(a, search.roots);
     var found: std.ArrayList(RepoRef) = .empty;
     var next: usize = 0;
-    while (next < queue.items.len) : (next += 1) {
+    queue: while (next < queue.items.len) : (next += 1) {
         const current = queue.items[next];
-        var excluded = false;
         if (search.excluded) |patterns| {
             if (!std.unicode.utf8ValidateSlice(current.path)) return error.NonUtf8Path;
             for (patterns) |pattern| {
-                if (std.mem.indexOf(u8, current.path, pattern) != null) {
-                    excluded = true;
-                    break;
-                }
+                if (std.mem.indexOf(u8, current.path, pattern) != null) continue :queue;
             }
         }
-        if (excluded) continue;
         if (try detect(io, current.path, search.providers)) |ref| {
             if (!std.unicode.utf8ValidateSlice(std.fs.path.basename(current.path))) return error.NonUtf8Path;
             try found.append(a, ref);
@@ -113,10 +108,12 @@ pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
                 .stdin = .ignore,
             });
             const dotgit = try std.fs.path.join(a, &.{ ref.path, ".git" });
-            const bare = if (success(configured_bare.term))
-                try parsers.boolean(line(configured_bare.stdout))
-            else
-                !exists(io, dotgit);
+            const bare = if (success(configured_bare.term)) blk: {
+                const value = line(configured_bare.stdout);
+                if (std.mem.eql(u8, value, "true")) break :blk true;
+                if (std.mem.eql(u8, value, "false")) break :blk false;
+                return error.InvalidBoolean;
+            } else !exists(io, dotgit);
             const linked_metadata = !std.mem.eql(u8, common, metadata);
             var cwd = if (bare and !linked_metadata) metadata else ref.path;
             if (!bare) {
@@ -126,21 +123,19 @@ pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
                     .stdin = .ignore,
                 });
                 var override: ?[]const u8 = null;
-                if (success(configured.term)) {
-                    var records = std.mem.splitScalar(u8, configured.stdout, 0);
-                    while (records.next()) |origin| {
-                        const value = records.next() orelse break;
-                        if (!std.mem.startsWith(u8, origin, "file:")) continue;
-                        const source = try std.fs.path.resolve(a, &.{ metadata, origin["file:".len..] });
-                        if (!std.mem.startsWith(u8, source, metadata) or
-                            source.len <= metadata.len or source[metadata.len] != std.fs.path.sep) continue;
-                        override = value;
-                    }
+                var records = std.mem.splitScalar(u8, if (success(configured.term)) configured.stdout else "", 0);
+                while (records.next()) |origin| {
+                    const value = records.next() orelse break;
+                    if (!std.mem.startsWith(u8, origin, "file:")) continue;
+                    const source = try std.fs.path.resolve(a, &.{ metadata, origin["file:".len..] });
+                    if (!std.mem.startsWith(u8, source, metadata) or
+                        source.len <= metadata.len or source[metadata.len] != std.fs.path.sep) continue;
+                    override = value;
                 }
                 if (override) |value| {
                     cwd = try std.fs.path.resolve(a, &.{ metadata, value });
                 } else if (!exists(io, dotgit) and std.mem.eql(u8, std.fs.path.basename(metadata), ".git")) {
-                    cwd = std.fs.path.dirname(metadata) orelse return error.GitError;
+                    cwd = std.fs.path.dirname(metadata).?;
                 }
             }
             return .{
@@ -159,8 +154,7 @@ pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
             const linked = isFile(io, repo_path);
             const metadata = if (linked) blk: {
                 const pointer = try Io.Dir.cwd().readFileAlloc(io, repo_path, a, .unlimited);
-                const relative_to = std.fs.path.dirname(repo_path) orelse return error.GitError;
-                break :blk try std.fs.path.resolve(a, &.{ relative_to, line(pointer) });
+                break :blk try std.fs.path.resolve(a, &.{ std.fs.path.dirname(repo_path).?, line(pointer) });
             } else repo_path;
             const bare = jj(io, a, ref.path, &.{
                 "log", "--no-graph", "-r", "@", "-T", "self.empty() ++ \"\\0\" ++ self.parents().map(|parent| parent.root()).join(\"\\0\")",
@@ -177,10 +171,10 @@ pub fn resolve(io: Io, a: A, ref: RepoRef) anyerror!Resolved {
 
 pub fn isBare(io: Io, a: A, env: *const std.process.Environ.Map, ref: RepoRef) anyerror!bool {
     if (ref.provider == .git and env.get("GIT_COMMON_DIR") == null and env.get("GIT_OBJECT_DIRECTORY") == null) {
-        return gitBare(io, a, ref) catch |err| switch (err) {
+        if (gitBare(io, a, ref)) |bare| return bare else |err| switch (err) {
             error.OutOfMemory, error.Canceled => return err,
-            else => (try resolve(io, a, ref)).bare,
-        };
+            else => {},
+        }
     }
     return (try resolve(io, a, ref)).bare;
 }
@@ -278,13 +272,34 @@ pub fn cloneRepo(io: Io, a: A, remote: []const u8, target: []const u8) anyerror!
     });
 }
 
-pub fn initRepo(io: Io, a: A, target: []const u8, env: *const std.process.Environ.Map) anyerror!void {
-    try @import("repos/init.zig").create(io, a, target, env);
-}
+pub const initRepo = @import("repos/init.zig").create;
 
 fn appendSubmodules(io: Io, a: A, repo: Resolved, prefix: []const u8, recursive: bool, result: *std.ArrayList(Submodule)) anyerror!void {
-    const modules = try moduleConfig(io, a, repo);
-    for (modules) |module| {
+    const file = try std.fs.path.join(a, &.{ repo.cwd, ".gitmodules" });
+    var source = [2][]const u8{ "--file", file };
+    const regular = if (Io.Dir.cwd().statFile(io, file, .{ .follow_symlinks = false })) |stat| stat.kind != .sym_link else |_| false;
+    if (repo.bare or !regular) {
+        const blob = for ([_][]const u8{ ":.gitmodules", "HEAD:.gitmodules" }) |candidate| {
+            const probe = try process.capture(io, a, .{
+                .argv = &.{ "git", "--git-dir", repo.metadata, "--work-tree", repo.metadata, "rev-parse", "--verify", candidate },
+                .cwd = repo.metadata,
+                .stdin = .ignore,
+            });
+            if (success(probe.term)) break candidate;
+        } else return;
+        source = .{ "--blob", blob };
+    }
+    const output = try process.capture(io, a, .{
+        .argv = &.{
+            "git",          "--git-dir",               repo.metadata, "--work-tree", repo.metadata, "config", "--null", source[0], source[1],
+            "--get-regexp", "^submodule\\..*\\.path$",
+        },
+        .cwd = repo.metadata,
+        .stdin = .ignore,
+    });
+    if (output.term == .exited and output.term.exited == 1) return;
+    if (!success(output.term)) return error.GitError;
+    for (try parsers.submoduleEntries(a, output.stdout)) |module| {
         const path = try std.fs.path.resolve(a, &.{ repo.cwd, module.path });
         const dotgit = try std.fs.path.join(a, &.{ path, ".git" });
         const sub: RepoRef = .{
@@ -314,40 +329,6 @@ fn gitMetadata(io: Io, a: A, path: []const u8) ![]const u8 {
         return error.GitError;
     };
     return Io.Dir.cwd().realPathFileAlloc(io, metadata, a);
-}
-
-fn moduleConfig(io: Io, a: A, repo: Resolved) ![]const parsers.Module {
-    const file = try std.fs.path.join(a, &.{ repo.cwd, ".gitmodules" });
-    var source = [2][]const u8{ "--file", file };
-    const stat = Io.Dir.cwd().statFile(io, file, .{ .follow_symlinks = false }) catch null;
-    if (repo.bare or stat == null or stat.?.kind == .sym_link) {
-        var blob: ?[]const u8 = null;
-        for ([_][]const u8{ ":.gitmodules", "HEAD:.gitmodules" }) |candidate| {
-            const probe = try process.capture(io, a, .{
-                .argv = &.{ "git", "--git-dir", repo.metadata, "--work-tree", repo.metadata, "rev-parse", "--verify", candidate },
-                .cwd = repo.metadata,
-                .stdin = .ignore,
-            });
-            if (success(probe.term)) {
-                blob = candidate;
-                break;
-            }
-        }
-        source = .{ "--blob", blob orelse return &.{} };
-    }
-    const output = try process.capture(io, a, .{
-        .argv = &.{
-            "git",          "--git-dir",               repo.metadata, "--work-tree", repo.metadata, "config", "--null", source[0], source[1],
-            "--get-regexp", "^submodule\\..*\\.path$",
-        },
-        .cwd = repo.metadata,
-        .stdin = .ignore,
-    });
-    if (!success(output.term)) {
-        if (output.term == .exited and output.term.exited == 1) return &.{};
-        return error.GitError;
-    }
-    return parsers.submoduleEntries(a, output.stdout);
 }
 
 fn gitCommonDirectory(io: Io, a: A, metadata: []const u8) ![]const u8 {

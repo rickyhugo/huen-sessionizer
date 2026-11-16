@@ -50,14 +50,10 @@ pub fn reduce(a: A, state: *State, event: Event, options: config.PickerOptions) 
             return .redraw;
         },
         .key => |key| {
-            var action: ?config.PickerAction = null;
-            for (options.bindings) |binding| {
-                if (std.meta.eql(key, binding.key)) {
-                    action = binding.action;
-                    break;
-                }
-            }
-            const count = scalarCount(state.query.items);
+            const action = for (options.bindings) |binding| {
+                if (std.meta.eql(key, binding.key)) break binding.action;
+            } else null;
+            const count = std.unicode.utf8CountCodepoints(state.query.items) catch unreachable;
             const old_cursor = state.scalar_cursor;
             var start = bytePosition(state.query.items, old_cursor);
             var end = start;
@@ -68,14 +64,8 @@ pub fn reduce(a: A, state: *State, event: Event, options: config.PickerOptions) 
                 .move_up, .move_down => {
                     if (state.ranked.len == 0) return .unchanged;
                     const increment = (mapped == .move_up) == (options.input_position == .bottom);
-                    const selected = state.selection orelse {
-                        state.selection = 0;
-                        keepVisible(state);
-                        return .redraw;
-                    };
-                    state.selection = if (increment)
-                        (if (selected + 1 >= state.ranked.len) 0 else selected + 1)
-                    else if (selected == 0) state.ranked.len - 1 else selected - 1;
+                    const len = state.ranked.len;
+                    state.selection = if (state.selection) |selected| (selected + if (increment) 1 else len - 1) % len else 0;
                     keepVisible(state);
                     return .redraw;
                 },
@@ -153,8 +143,11 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
         if (dirty) {
             _ = frame.reset(.retain_capacity);
             const a = frame.allocator();
-            const selected = if (state.selection) |i| items[state.ranked[i]] else null;
-            const text = if (selected) |item| preview.read(io, a, item.preview) catch "" else "";
+            const text = if (state.selection) |i| switch (items[state.ranked[i]].preview) {
+                .none => "",
+                .pane => |pane| pane.client.capture(io, a, pane.target) catch "",
+                .directory => |path| preview.directory(io, a, path) catch "",
+            } else "";
             if (try tty.checkSignals()) {
                 _ = try reduce(scratch, &state, .{ .resize = tty.size() }, options);
             }
@@ -166,8 +159,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
             };
             dirty = false;
         }
-        const waiting = decoder.pending();
-        const ready = try tty.wait(if (waiting) 35 else 100);
+        const ready = try tty.wait(if (decoder.pending()) 35 else 100);
         if (try tty.checkSignals()) {
             _ = try reduce(scratch, &state, .{ .resize = tty.size() }, options);
             dirty = true;
@@ -199,11 +191,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
     }
 }
 
-fn scalarCount(text: []const u8) usize {
-    return std.unicode.utf8CountCodepoints(text) catch unreachable;
-}
-
-fn bytePosition(text: []const u8, scalar: usize) usize {
+pub fn bytePosition(text: []const u8, scalar: usize) usize {
     var pos: usize = 0;
     var remaining = scalar;
     while (pos < text.len and remaining > 0) : (remaining -= 1) {

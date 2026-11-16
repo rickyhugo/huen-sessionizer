@@ -51,7 +51,7 @@ pub const Terminal = struct {
         if (c.tcgetattr(fd, &self.original) != 0) return error.TerminalAttributes;
         errdefer self.restoreHandlers();
         for (signals) |signal| {
-            var action: c.Sigaction = std.mem.zeroes(c.Sigaction);
+            var action = std.mem.zeroes(c.Sigaction);
             action.handler.handler = signalHandler;
             _ = c.sigemptyset(&action.mask);
             if (c.sigaction(signal, &action, &self.handlers[self.handlers_set]) != 0) return error.SignalHandler;
@@ -135,7 +135,7 @@ pub const Terminal = struct {
     }
 
     pub fn size(self: *const Terminal) Size {
-        var value: c.winsize = std.mem.zeroes(c.winsize);
+        var value = std.mem.zeroes(c.winsize);
         if (c.ioctl(self.fd, c.T.IOCGWINSZ, @intFromPtr(&value)) != 0) return .{ .width = 80, .height = 24 };
         return .{ .width = value.col, .height = value.row };
     }
@@ -147,8 +147,8 @@ pub const Terminal = struct {
             if (suspended.load(.monotonic)) return error.TerminalInterrupted;
             const n = c.write(self.fd, rest.ptr, rest.len);
             if (n < 0) {
-                if (std.c._errno().* == @backingInt(c.E.INTR)) continue;
-                if (std.c._errno().* == @backingInt(c.E.AGAIN)) {
+                if (c._errno().* == @backingInt(c.E.INTR)) continue;
+                if (c._errno().* == @backingInt(c.E.AGAIN)) {
                     var fd: c.pollfd = .{ .fd = self.fd, .events = c.POLL.OUT, .revents = 0 };
                     const ready = c.poll(@ptrCast(&fd), 1, 50);
                     if (ready < 0 and c._errno().* != @backingInt(c.E.INTR)) return error.TerminalPoll;
@@ -165,10 +165,7 @@ pub const Terminal = struct {
     pub fn wait(self: *const Terminal, timeout: c_int) !bool {
         var fd: c.pollfd = .{ .fd = self.fd, .events = c.POLL.IN, .revents = 0 };
         const n = c.poll(@ptrCast(&fd), 1, timeout);
-        if (n < 0) {
-            if (std.c._errno().* == @backingInt(c.E.INTR)) return false;
-            return error.TerminalPoll;
-        }
+        if (n < 0) return if (c._errno().* == @backingInt(c.E.INTR)) false else error.TerminalPoll;
         if (fd.revents & (c.POLL.HUP | c.POLL.ERR | c.POLL.NVAL) != 0) return error.TerminalClosed;
         return n > 0 and fd.revents & c.POLL.IN != 0;
     }
@@ -177,7 +174,7 @@ pub const Terminal = struct {
         while (true) {
             const n = c.read(self.fd, bytes.ptr, bytes.len);
             if (n >= 0) return @intCast(n);
-            if (std.c._errno().* != @backingInt(c.E.INTR)) return error.TerminalRead;
+            if (c._errno().* != @backingInt(c.E.INTR)) return error.TerminalRead;
             if (terminating.load(.monotonic) != 0) return error.Terminated;
         }
     }

@@ -2,7 +2,6 @@
 """Check repository initialization and listing on private tmux sockets."""
 
 import argparse
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
@@ -12,13 +11,11 @@ from workspace import Workspace
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ROOT / "src/repos/template"
-INVALID_BRANCHES = {
-    "branch-empty": "",
-    "branch-space": "a b",
-    "branch-dots": "a..b",
-    "branch-newline": "feature\n",
-}
 BRANCHES = {
+    "branch-empty": ("", None),
+    "branch-space": ("a b", None),
+    "branch-dots": ("a..b", None),
+    "branch-newline": ("feature\n", None),
     "branch-qualified": ("refs/heads/custom", "refs/heads/custom"),
     "branch-reserved": ("HEAD", None),
     "branch-qualified-reserved": ("refs/heads/HEAD", None),
@@ -28,15 +25,6 @@ BRANCHES = {
     "branch-quotes": ('"quoted"', 'refs/heads/"quoted"'),
     "branch-at": ("@", "refs/heads/@"),
 }
-
-
-@contextmanager
-def fixed_umask():
-    previous = os.umask(0o022)
-    try:
-        yield
-    finally:
-        os.umask(previous)
 
 
 def check_layout(metadata, head="refs/heads/main"):
@@ -81,23 +69,23 @@ def check_init(workspace, kind):
         if kind == "existing-empty":
             metadata.mkdir(parents=True)
         elif kind == "existing-repository":
-            workspace.setup([["git", "init", str(target)]])
+            workspace.setup("git", "init", str(target))
         else:
-            workspace.setup([["git", "init", str(root / "other")]])
+            workspace.setup("git", "init", str(root / "other"))
             target.mkdir()
             metadata.write_text("gitdir: " + str(root / "other/.git") + "\n")
-        before = {
-            str(path.relative_to(target)): path.read_bytes()
-            for path in target.rglob("*")
-            if path.is_file()
-        }
+
+        def contents():
+            return {
+                str(path.relative_to(target)): path.read_bytes()
+                for path in target.rglob("*")
+                if path.is_file()
+            }
+
+        before = contents()
         result = workspace.run(["tms", "init-repo", "fresh"])
         assert result.returncode == 1, result
-        assert before == {
-            str(path.relative_to(target)): path.read_bytes()
-            for path in target.rglob("*")
-            if path.is_file()
-        }
+        assert before == contents()
         assert not workspace.sessions()
         return
 
@@ -146,23 +134,11 @@ def check_init(workspace, kind):
 
 
 def check_listing(workspace, name):
-    workspace.setup(
-        [
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                name,
-                "-c",
-                str(workspace.root / "search"),
-            ]
-        ]
-    )
+    search = str(workspace.root / "search")
+    workspace.setup("tmux", "new-session", "-d", "-s", name, "-c", search)
     result = workspace.run(["tms", "sessions"])
-    expected = name + "*  \n"
     assert result.returncode == 0, result
-    assert result.stdout == expected, repr(result.stdout)
+    assert result.stdout == name + "*  \n", repr(result.stdout)
 
 
 def check_config_sources(workspace, kind):
@@ -195,26 +171,6 @@ def check_config_sources(workspace, kind):
     assert len(workspace.sessions()) == (0 if status else 1)
 
 
-def check_failure(workspace, kind):
-    workspace.env["GIT_CONFIG_VALUE_0"] = INVALID_BRANCHES[kind]
-    result = workspace.run(["tms", "init-repo", "fresh"])
-    assert result.returncode == 1, result
-    check_layout(workspace.root / "search/fresh/.git")
-    assert not workspace.sessions()
-
-
-def check_shared(workspace):
-    workspace.env.update(
-        GIT_CONFIG_COUNT="2",
-        GIT_CONFIG_KEY_1="core.sharedRepository",
-        GIT_CONFIG_VALUE_1="group",
-    )
-    result = workspace.run(["tms", "init-repo", "fresh"])
-    assert result.returncode == 0, result
-    check_layout(workspace.root / "search/fresh/.git")
-    assert len(workspace.sessions()) == 1
-
-
 def check_branch(workspace, kind):
     value, expected = BRANCHES.get(kind, ("main", "refs/heads/main"))
     workspace.env["GIT_CONFIG_VALUE_0"] = value
@@ -224,6 +180,12 @@ def check_branch(workspace, kind):
         workspace.env["GIT_CONFIG_PARAMETERS"] = "'init.defaultBranch=wrong'"
     elif kind == "config-parameters-invalid":
         workspace.env["GIT_CONFIG_PARAMETERS"] = "not quoted"
+    elif kind == "shared-group":
+        workspace.env.update(
+            GIT_CONFIG_COUNT="2",
+            GIT_CONFIG_KEY_1="core.sharedRepository",
+            GIT_CONFIG_VALUE_1="group",
+        )
     result = workspace.run(["tms", "init-repo", "fresh"])
     assert result.returncode == (0 if expected else 1), result
     check_layout(workspace.root / "search/fresh/.git", expected or "refs/heads/main")
@@ -235,6 +197,7 @@ def main():
     parser.add_argument("--binary", type=Path, default=ROOT / "zig-out/bin/tms")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
+    os.umask(0o022)
     cases = [
         "existing-empty",
         "existing-repository",
@@ -259,19 +222,13 @@ def main():
         "test-default-branch",
         "config-parameters",
         "config-parameters-invalid",
+        "shared-group",
     ]
     failures = 0
     for case in (
-        cases
-        + config_cases
-        + list(INVALID_BRANCHES)
-        + branch_cases
-        + ["shared-group", "quo'te,ui", "'edge'", " a 'b,c "]
+        cases + config_cases + branch_cases + ["quo'te,ui", "'edge'", " a 'b,c "]
     ):
-        with (
-            tempfile.TemporaryDirectory(prefix="tms-commands-") as directory,
-            fixed_umask(),
-        ):
+        with tempfile.TemporaryDirectory(prefix="tms-commands-") as directory:
             workspace = Workspace(Path(directory).resolve(), binary)
             try:
                 (workspace.root / "config.toml").write_text(
@@ -283,10 +240,6 @@ def main():
                     check_init(workspace, case)
                 elif case in config_cases:
                     check_config_sources(workspace, case)
-                elif case in INVALID_BRANCHES:
-                    check_failure(workspace, case)
-                elif case == "shared-group":
-                    check_shared(workspace)
                 elif case in branch_cases:
                     check_branch(workspace, case)
                 else:
@@ -296,7 +249,7 @@ def main():
                 failures += 1
                 print(f"FAIL {case}: {error}")
             finally:
-                workspace.close()
+                workspace.tmux_run("kill-server")
     return bool(failures)
 
 

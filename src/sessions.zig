@@ -84,17 +84,6 @@ fn componentFromEnd(p: []const u8, depth: usize) ?[]const u8 {
     return null;
 }
 
-fn suffix(a: A, p: []const u8, count: usize) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
-    defer parts.deinit(a);
-    var n: usize = 0;
-    while (n < count) : (n += 1) {
-        try parts.append(a, componentFromEnd(p, n) orelse break);
-    }
-    std.mem.reverse([]const u8, parts.items);
-    return std.mem.join(a, "/", parts.items);
-}
-
 fn deduplicate(a: A, entries: []Session) !void {
     const visited = try a.alloc(bool, entries.len);
     defer a.free(visited);
@@ -111,27 +100,25 @@ fn deduplicate(a: A, entries: []Session) !void {
         }
         if (group.items.len < 2) continue;
         var depth: usize = 1;
-        var remaining = group.items.len;
-        while (remaining > 0) {
-            remaining -= 1;
-            const current = sourcePath(entries[group.items[remaining]]);
+        for (group.items, 0..) |current, k| {
             var current_depth: usize = 1;
-            while (componentFromEnd(current, current_depth)) |part| {
-                var equal = false;
-                for (group.items[0..remaining]) |j| {
-                    if (componentFromEnd(sourcePath(entries[j]), current_depth)) |other| {
-                        if (std.mem.eql(u8, part, other)) {
-                            equal = true;
-                            break;
-                        }
-                    }
-                }
-                if (!equal) break;
-                current_depth += 1;
+            while (componentFromEnd(sourcePath(entries[current]), current_depth)) |part| : (current_depth += 1) {
+                for (group.items[0..k]) |j| {
+                    const other = componentFromEnd(sourcePath(entries[j]), current_depth) orelse continue;
+                    if (std.mem.eql(u8, part, other)) break;
+                } else break;
             }
             depth = @max(depth, current_depth);
         }
-        for (group.items) |j| entries[j].name = try suffix(a, sourcePath(entries[j]), depth + 1);
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(a);
+        for (group.items) |j| {
+            const p = sourcePath(entries[j]);
+            parts.clearRetainingCapacity();
+            for (0..depth + 1) |n| try parts.append(a, componentFromEnd(p, n) orelse break);
+            std.mem.reverse([]const u8, parts.items);
+            entries[j].name = try std.mem.join(a, "/", parts.items);
+        }
         for (0..group.items.len / 2) |j| {
             std.mem.swap(Session, &entries[group.items[j]], &entries[group.items[group.items.len - 1 - j]]);
         }
@@ -166,14 +153,9 @@ pub fn activeTimestamp(key: []const u8, snapshot: tmux.Snapshot) ?i64 {
         const timestamp = std.fmt.parseInt(i64, s.last_attached, 10) catch continue;
         if (std.mem.eql(u8, key, s.name)) return timestamp;
         if (key.len != s.name.len) continue;
-        var equal = true;
         for (key, s.name) |c, d| {
-            if ((if (c == '.' or c == '-') @as(u8, '_') else c) != d) {
-                equal = false;
-                break;
-            }
-        }
-        if (equal) return timestamp;
+            if ((if (c == '.' or c == '-') '_' else c) != d) break;
+        } else return timestamp;
     }
     return null;
 }
@@ -206,31 +188,24 @@ pub fn fromPath(io: Io, a: A, env: *const Env, input_path: []const u8) anyerror!
 }
 
 pub fn path(io: Io, a: A, entry: Session) anyerror![]const u8 {
-    return switch (entry.source) {
-        .bookmark => |p| p,
-        .repository => |ref| blk: {
-            const resolved = try repos.resolve(io, a, ref);
-            break :blk if (resolved.bare) resolved.cwd else try std.Io.Dir.cwd().realPathFileAlloc(io, resolved.cwd, a);
-        },
+    const ref = switch (entry.source) {
+        .bookmark => |p| return p,
+        .repository => |ref| ref,
     };
+    const resolved = try repos.resolve(io, a, ref);
+    return if (resolved.bare) resolved.cwd else try std.Io.Dir.cwd().realPathFileAlloc(io, resolved.cwd, a);
 }
 
 pub fn open(io: Io, a: A, entry: Session, client: *const tmux.Client, cfg: *const config.Config) anyerror!void {
     const cwd = try path(io, a, entry);
     const name = try std.mem.replaceOwned(u8, a, entry.name, ".", "_");
     const snapshot = try client.snapshot(io, a);
-    var exists = false;
     for (snapshot.sessions) |s| {
-        if (std.mem.eql(u8, s.name, name)) exists = true;
-    }
-    if (!exists) {
+        if (std.mem.eql(u8, s.name, name)) break;
+    } else {
         _ = try client.newSession(io, a, name, cwd);
-        const script = if (cfg.session_configs) |configs| blk: {
-            if (configs.get(name)) |item| {
-                if (item.create_script) |p| break :blk p;
-            }
-            break :blk try std.fs.path.join(a, &.{ sourcePath(entry), ".tms-create" });
-        } else try std.fs.path.join(a, &.{ sourcePath(entry), ".tms-create" });
+        const configured = if (cfg.session_configs) |configs| configs.get(name) else null;
+        const script = (if (configured) |item| item.create_script else null) orelse try std.fs.path.join(a, &.{ sourcePath(entry), ".tms-create" });
         if (std.Io.Dir.cwd().access(io, script, .{})) |_| {
             _ = try client.sendKeys(io, a, script, try std.fmt.allocPrint(a, "{s}:{{start}}.{{top}}", .{name}));
         } else |_| {}

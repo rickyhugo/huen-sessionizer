@@ -16,18 +16,7 @@ pub const Output = struct {
 };
 
 pub fn capture(io: Io, a: A, request: Request) anyerror!Output {
-    if (request.argv.len == 0) return error.EmptyArgv;
-    var child = try std.process.spawn(io, .{
-        .argv = request.argv,
-        .cwd = cwd(request),
-        .environ_map = request.env,
-        .stdin = switch (request.stdin) {
-            .inherit => .inherit,
-            .ignore => .ignore,
-        },
-        .stdout = .pipe,
-        .stderr = .pipe,
-    });
+    var child = try spawn(io, request, .pipe);
     defer abortChild(io, &child);
 
     var buffer: Io.File.MultiReader.Buffer(2) = undefined;
@@ -50,18 +39,24 @@ pub fn capture(io: Io, a: A, request: Request) anyerror!Output {
 }
 
 pub fn inherit(io: Io, request: Request) anyerror!std.process.Child.Term {
+    var child = try spawn(io, request, .inherit);
+    defer abortChild(io, &child);
+    return try waitOwnedChild(io, &child);
+}
+
+fn spawn(io: Io, request: Request, output: std.process.SpawnOptions.StdIo) !std.process.Child {
     if (request.argv.len == 0) return error.EmptyArgv;
-    var child = try std.process.spawn(io, .{
+    return std.process.spawn(io, .{
         .argv = request.argv,
-        .cwd = cwd(request),
+        .cwd = if (request.cwd) |path| .{ .path = path } else .inherit,
         .environ_map = request.env,
         .stdin = switch (request.stdin) {
             .inherit => .inherit,
             .ignore => .ignore,
         },
+        .stdout = output,
+        .stderr = output,
     });
-    defer abortChild(io, &child);
-    return try waitOwnedChild(io, &child);
 }
 
 fn waitOwnedChild(io: Io, child: *std.process.Child) !std.process.Child.Term {
@@ -166,11 +161,11 @@ const ReplacementInput = struct {
 
 pub fn movePath(io: Io, a: A, from: []const u8, to: []const u8) anyerror!void {
     const dir = Io.Dir.cwd();
-    const destination_stat = dir.statFile(io, to, .{}) catch |err| switch (err) {
-        error.FileNotFound => null,
+    const into_directory = if (dir.statFile(io, to, .{})) |stat| stat.kind == .directory else |err| switch (err) {
+        error.FileNotFound => false,
         else => return err,
     };
-    const destination = if (destination_stat != null and destination_stat.?.kind == .directory)
+    const destination = if (into_directory)
         try std.fs.path.join(a, &.{ to, std.fs.path.basename(from) })
     else
         try a.dupe(u8, to);
@@ -182,10 +177,6 @@ pub fn movePath(io: Io, a: A, from: []const u8, to: []const u8) anyerror!void {
     };
 }
 
-fn cwd(request: Request) std.process.Child.Cwd {
-    return if (request.cwd) |path| .{ .path = path } else .inherit;
-}
-
 fn moveAcrossDevices(io: Io, a: A, from: []const u8, to: []const u8) anyerror!void {
     const dir = Io.Dir.cwd();
     const source = try dir.statFile(io, from, .{ .follow_symlinks = false });
@@ -194,12 +185,11 @@ fn moveAcrossDevices(io: Io, a: A, from: []const u8, to: []const u8) anyerror!vo
         defer a.free(source_path);
         const parent_path = try dir.realPathFileAlloc(io, std.fs.path.dirname(to) orelse ".", a);
         defer a.free(parent_path);
-        if (std.mem.eql(u8, source_path, parent_path) or
-            (std.mem.startsWith(u8, parent_path, source_path) and
-                (std.mem.endsWith(u8, source_path, "/") or parent_path[source_path.len] == '/')))
+        if (std.mem.startsWith(u8, parent_path, source_path) and (parent_path.len == source_path.len or
+            std.mem.endsWith(u8, source_path, "/") or parent_path[source_path.len] == '/'))
             return error.InvalidDestination;
     }
-    var context: @import("process/move.zig").CopyContext = .init(a);
+    var context: @import("process/move.zig").CopyContext = .{ .arena = .init(a) };
     defer context.deinit();
     try context.publish(io, from, to);
     try dir.deleteTree(io, from);
@@ -214,7 +204,7 @@ test "cross-device fallback copies before removing and does not merge" {
 }
 
 test "cross-device fallback preserves native metadata and hardlinks" {
-    try @import("process/move_tests.zig").checkPreservation(moveAcrossDevices);
+    try @import("process/move_tests.zig").checkPreservation(moveAcrossDevices, null);
 }
 
 test "cross-device fallback keeps failed copies private and retryable" {
@@ -222,7 +212,7 @@ test "cross-device fallback keeps failed copies private and retryable" {
 }
 
 test "cross-device fallback preserves inherited Darwin file and directory ACLs" {
-    try @import("process/move_tests.zig").checkInheritedAcls(moveAcrossDevices);
+    try @import("process/move_tests.zig").checkInheritedAcls(moveAcrossDevices, null);
 }
 
 test "failed publication removes read-only staging directories without following links" {
@@ -234,9 +224,9 @@ test "native move preserves metadata and ACLs across a real device boundary" {
 }
 
 test "cross-device fallback finishes sibling hardlinks before restrictive ACLs" {
-    try @import("process/move_tests.zig").checkAclHardlinks(moveAcrossDevices);
+    try @import("process/move_tests.zig").checkAclHardlinks(moveAcrossDevices, null);
 }
 
 test "cross-device fallback preserves Darwin flags and cleans failed publication" {
-    try @import("process/move_tests.zig").checkFlags(moveAcrossDevices);
+    try @import("process/move_tests.zig").checkFlags(moveAcrossDevices, null);
 }

@@ -4,7 +4,7 @@ const sessions = @import("sessions");
 const spec = @import("spec.zig");
 const A = std.mem.Allocator;
 const Env = std.process.Environ.Map;
-pub const Candidate = struct { value: []const u8, help: ?[]const u8 = null };
+const Candidate = struct { value: []const u8, help: ?[]const u8 = null };
 const Shell = enum { bash, elvish, fish, powershell, zsh };
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
@@ -16,36 +16,54 @@ pub fn complete(io: std.Io, a: A, argv: []const []const u8, env: *const Env) !bo
     const name = std.fs.path.stem(std.fs.path.basename(setting));
     const shell = if (std.mem.eql(u8, name, "powershell_ise")) Shell.powershell else std.meta.stringToEnum(Shell, name) orelse return error.UnknownCompletionShell;
     var args: []const []const u8 = &.{};
-    for (argv, 0..) |arg, i| {
-        if (i != 0 and std.mem.eql(u8, arg, "--")) {
-            args = argv[i + 1 ..];
-            break;
-        }
-    }
+    for (argv, 0..) |arg, i| if (i != 0 and std.mem.eql(u8, arg, "--")) {
+        args = argv[i + 1 ..];
+        break;
+    };
     if (args.len == 0) {
-        try std.Io.File.stdout().writeStreamingAll(io, try registration(a, shell, if (argv.len == 0) "tms" else argv[0]));
+        const executable = if (argv.len == 0) "tms" else argv[0];
+        const template = switch (shell) {
+            .bash => @embedFile("registration/bash"),
+            .elvish => @embedFile("registration/elvish"),
+            .fish => @embedFile("registration/fish"),
+            .powershell => @embedFile("registration/powershell"),
+            .zsh => @embedFile("registration/zsh"),
+        };
+        const with_bin = try std.mem.replaceOwned(u8, a, template, "@BIN@", try shQuote(a, std.fs.path.basename(executable)));
+        const script = try std.mem.replaceOwned(u8, a, with_bin, "@COMPLETER@", try shQuote(a, executable));
+        try std.Io.File.stdout().writeStreamingAll(io, switch (shell) {
+            .bash, .elvish => try std.mem.concat(a, u8, &.{ script, "\n" }),
+            .powershell => try std.mem.concat(a, u8, &.{ script, "        \n" }),
+            else => script,
+        });
         return true;
     }
     const index = if (shell == .fish or shell == .powershell) args.len - 1 else if (env.get("_CLAP_COMPLETE_INDEX")) |v| config.parseIndex(v) catch 0 else 0;
     if (index == args.len and shell == .zsh) args = try std.mem.concat(a, []const u8, &.{ args, &.{""} });
     if (index == 0 or index >= args.len) return error.NoCompletionGenerated;
-    const items = try candidates(io, a, args, index, env);
     var out: std.Io.Writer.Allocating = .init(a);
+    const w = &out.writer;
     const ifs = env.get("_CLAP_IFS") orelse "\n";
-    for (items, 0..) |item, i| {
-        if (shell == .bash or shell == .elvish or shell == .zsh) {
-            if (i != 0) try out.writer.writeAll(ifs);
-        }
-        if (shell == .zsh) {
-            try escapeZsh(&out.writer, item.value, true);
-        } else try out.writer.writeAll(item.value);
-        if (shell == .fish or shell == .powershell or shell == .zsh) {
-            if (item.help) |description| {
-                try out.writer.writeByte(if (shell == .zsh) ':' else '\t');
-                const first_line = description[0 .. std.mem.indexOfScalar(u8, description, '\n') orelse description.len];
-                if (shell == .zsh) try escapeZsh(&out.writer, first_line, false) else try out.writer.writeAll(first_line);
-            }
-            if (shell != .zsh) try out.writer.writeByte('\n');
+    for (try candidates(io, a, args, index, env), 0..) |item, i| {
+        const help = if (item.help) |text| text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len] else null;
+        switch (shell) {
+            .bash, .elvish => {
+                if (i != 0) try w.writeAll(ifs);
+                try w.writeAll(item.value);
+            },
+            .fish, .powershell => {
+                try w.writeAll(item.value);
+                if (help) |text| try w.print("\t{s}", .{text});
+                try w.writeByte('\n');
+            },
+            .zsh => {
+                if (i != 0) try w.writeAll(ifs);
+                try escapeZsh(w, item.value, true);
+                if (help) |text| {
+                    try w.writeByte(':');
+                    try escapeZsh(w, text, false);
+                }
+            },
         }
     }
     try std.Io.File.stdout().writeStreamingAll(io, out.written());
@@ -60,13 +78,12 @@ fn escapeZsh(w: *std.Io.Writer, value: []const u8, escape_colon: bool) !void {
 }
 
 fn option(id: spec.Id, value: []const u8) ?spec.Option {
-    const long = std.mem.startsWith(u8, value, "--");
-    if (long) return spec.findOption(id, .{ .long = value[2 .. std.mem.indexOfScalar(u8, value, '=') orelse value.len] });
+    if (std.mem.startsWith(u8, value, "--")) return spec.findOption(id, .{ .long = value[2 .. std.mem.indexOfScalar(u8, value, '=') orelse value.len] });
     if (value.len >= 2 and value[0] == '-') return spec.findOption(id, .{ .short = value[1] });
     return null;
 }
 
-pub fn candidates(io: std.Io, a: A, args: []const []const u8, index: usize, env: *const Env) ![]const Candidate {
+fn candidates(io: std.Io, a: A, args: []const []const u8, index: usize, env: *const Env) ![]const Candidate {
     var id: spec.Id = .root;
     var pending: ?spec.Option = null;
     var consumed: usize = 0;
@@ -79,30 +96,20 @@ pub fn candidates(io: std.Io, a: A, args: []const []const u8, index: usize, env:
             help_context = true;
             help_from_root = id == .root;
             pending = null;
-            continue;
-        }
-        if (spec.child(id, arg)) |child| {
+        } else if (spec.child(id, arg)) |child| {
             id = child;
             positional_used = false;
             pending = null;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--")) {
+        } else if (std.mem.eql(u8, arg, "--")) {
             escaped = true;
             pending = null;
-            continue;
-        }
-        if (!escaped and arg.len > 1 and arg[0] == '-') {
+        } else if (!escaped and arg.len > 1 and arg[0] == '-') {
             pending = null;
-            if (option(id, arg)) |o| {
-                if (o.kind != .flag and std.mem.indexOfScalar(u8, arg, '=') == null and (std.mem.startsWith(u8, arg, "--") or arg.len == 2)) {
-                    pending = o;
-                    consumed = 0;
-                }
-            }
-            continue;
-        }
-        if (pending) |o| {
+            if (option(id, arg)) |o| if (o.kind != .flag and std.mem.indexOfScalar(u8, arg, '=') == null and (std.mem.startsWith(u8, arg, "--") or arg.len == 2)) {
+                pending = o;
+                consumed = 0;
+            };
+        } else if (pending) |o| {
             consumed += 1;
             if (!o.many()) pending = null;
         } else positional_used = true;
@@ -117,70 +124,55 @@ pub fn candidates(io: std.Io, a: A, args: []const []const u8, index: usize, env:
         try subcommands(a, &items, id, current, !help_from_root or id == .root);
         return items.toOwnedSlice(a);
     }
-    if (!escaped or !positional_used) {
-        try subcommands(a, &items, id, current, true);
-        if (!positional_used) {
-            if (id == .open_session) {
-                const cfg = config.load(io, a, env) catch null;
-                if (cfg) |c| {
-                    const catalog = sessions.discover(io, a, env, &c) catch null;
-                    if (catalog) |cat| for (cat.entries) |entry| if (std.mem.startsWith(u8, entry.key, current)) {
-                        try items.append(a, .{ .value = entry.key });
-                    };
-                }
-            } else if (id == .marks or id == .marks_open or id == .marks_delete) {
-                const cfg = config.load(io, a, env) catch config.Config{};
-                for (try config.validMarks(io, a, env, &cfg)) |mark| {
-                    const value = try std.fmt.allocPrint(a, "{d}", .{mark.index});
-                    if (std.mem.startsWith(u8, value, current)) try items.append(a, .{ .value = value, .help = std.fs.path.basename(mark.path) });
-                }
-            }
+    if (escaped and positional_used) return items.toOwnedSlice(a);
+    try subcommands(a, &items, id, current, true);
+    if (!positional_used and id == .open_session) {
+        const cfg = config.load(io, a, env) catch null;
+        if (cfg) |c| {
+            const catalog = sessions.discover(io, a, env, &c) catch null;
+            if (catalog) |cat| for (cat.entries) |entry| if (std.mem.startsWith(u8, entry.key, current)) {
+                try items.append(a, .{ .value = entry.key });
+            };
+        }
+    } else if (!positional_used and (id == .marks or id == .marks_open or id == .marks_delete)) {
+        const cfg = config.load(io, a, env) catch config.Config{};
+        for (try config.validMarks(io, a, env, &cfg)) |mark| {
+            const value = try std.fmt.allocPrint(a, "{d}", .{mark.index});
+            if (std.mem.startsWith(u8, value, current)) try items.append(a, .{ .value = value, .help = std.fs.path.basename(mark.path) });
         }
     }
-    if (!escaped or !positional_used) try optionCandidates(a, &items, id, current);
+    if (std.mem.startsWith(u8, current, "--")) if (std.mem.indexOfScalar(u8, current, '=')) |equal| {
+        if (option(id, current)) |o| try valueCandidates(a, &items, o, current[equal + 1 ..], current[0 .. equal + 1]);
+        return items.toOwnedSlice(a);
+    };
+    const short = std.mem.startsWith(u8, current, "-") and !std.mem.startsWith(u8, current, "--");
+    if (current.len > 1 and short) if (option(id, current)) |o| if (o.kind != .flag) {
+        try valueCandidates(a, &items, o, current[2..], current[0..2]);
+        return items.toOwnedSlice(a);
+    };
+    for (try spec.allOptions(a, id)) |o| {
+        if (short) {
+            if (o.short) |ch| {
+                try items.append(a, .{ .value = try std.fmt.allocPrint(a, "{s}{c}", .{ current, ch }), .help = o.about });
+            } else if (current.len == 1) try items.append(a, .{ .value = try std.fmt.allocPrint(a, "--{s}", .{o.long}), .help = o.about });
+        } else {
+            const value = try std.fmt.allocPrint(a, "--{s}", .{o.long});
+            if (std.mem.startsWith(u8, value, current)) try items.append(a, .{ .value = value, .help = o.about });
+        }
+    }
     return items.toOwnedSlice(a);
 }
 
 fn subcommands(a: A, items: *std.ArrayList(Candidate), id: spec.Id, prefix: []const u8, include_help: bool) !void {
-    if (id != .root and id != .marks and id != .config) return;
-    for (spec.specs) |s| if (s.parent == id and !spec.isHelp(s.id) and std.mem.startsWith(u8, s.name, prefix)) {
+    for (spec.specs) |s| if (s.parent == id and (include_help or !spec.isHelp(s.id)) and std.mem.startsWith(u8, s.name, prefix)) {
         try items.append(a, .{ .value = s.name, .help = s.about });
     };
-    if (include_help and std.mem.startsWith(u8, "help", prefix)) try items.append(a, .{ .value = "help", .help = "Print this message or the help of the given subcommand(s)" });
 }
 
 fn valueCandidates(a: A, items: *std.ArrayList(Candidate), o: spec.Option, prefix: []const u8, added: []const u8) !void {
     for (spec.values(o.kind)) |value| if (std.mem.startsWith(u8, value, prefix)) {
         try items.append(a, .{ .value = try std.mem.concat(a, u8, &.{ added, value }) });
     };
-}
-
-fn optionCandidates(a: A, items: *std.ArrayList(Candidate), id: spec.Id, prefix: []const u8) !void {
-    if (std.mem.startsWith(u8, prefix, "--")) if (std.mem.indexOfScalar(u8, prefix, '=')) |equal| {
-        if (option(id, prefix)) |o| try valueCandidates(a, items, o, prefix[equal + 1 ..], prefix[0 .. equal + 1]);
-        return;
-    };
-    var options: std.ArrayList(spec.Option) = .empty;
-    try options.appendSlice(a, spec.get(id).options);
-    try options.append(a, spec.help_option);
-    if (id == .root) try options.append(a, spec.version_option);
-    const short = std.mem.startsWith(u8, prefix, "-") and !std.mem.startsWith(u8, prefix, "--");
-    if (prefix.len > 1 and short) {
-        if (option(id, prefix)) |o| if (o.kind != .flag) {
-            try valueCandidates(a, items, o, prefix[2..], prefix[0..2]);
-            return;
-        };
-    }
-    for (options.items) |o| {
-        if (short) {
-            if (o.short) |ch| {
-                try items.append(a, .{ .value = try std.fmt.allocPrint(a, "{s}{c}", .{ prefix, ch }), .help = o.about });
-            } else if (prefix.len == 1) try items.append(a, .{ .value = try std.fmt.allocPrint(a, "--{s}", .{o.long}), .help = o.about });
-        } else {
-            const value = try std.fmt.allocPrint(a, "--{s}", .{o.long});
-            if (std.mem.startsWith(u8, value, prefix)) try items.append(a, .{ .value = value, .help = o.about });
-        }
-    }
 }
 
 fn shQuote(a: A, value: []const u8) ![]const u8 {
@@ -196,25 +188,6 @@ fn shQuote(a: A, value: []const u8) ![]const u8 {
     } else try out.writer.writeByte(ch);
     try out.writer.writeByte('\'');
     return out.toOwnedSlice();
-}
-
-fn registration(a: A, shell: Shell, executable: []const u8) ![]const u8 {
-    const bin = try shQuote(a, std.fs.path.basename(executable));
-    const quoted = try shQuote(a, executable);
-    const template = switch (shell) {
-        .bash => @embedFile("registration/bash"),
-        .elvish => @embedFile("registration/elvish"),
-        .fish => @embedFile("registration/fish"),
-        .powershell => @embedFile("registration/powershell"),
-        .zsh => @embedFile("registration/zsh"),
-    };
-    const with_bin = try std.mem.replaceOwned(u8, a, template, "@BIN@", bin);
-    const script = try std.mem.replaceOwned(u8, a, with_bin, "@COMPLETER@", quoted);
-    return switch (shell) {
-        .bash, .elvish => std.mem.concat(a, u8, &.{ script, "\n" }),
-        .powershell => std.mem.concat(a, u8, &.{ script, "        \n" }),
-        else => script,
-    };
 }
 
 test "static completion order, values, prefixes, and multi-value arguments" {

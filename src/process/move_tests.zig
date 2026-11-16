@@ -17,10 +17,6 @@ const acl = struct {
 extern "c" fn getgroups(c_int, [*]c.gid_t) c_int;
 extern "c" fn mbr_uid_to_uuid(c.uid_t, *[16]u8) c_int;
 
-pub fn checkInheritedAcls(move: anytype) !void {
-    try inheritedAclsAt(move, null);
-}
-
 pub fn checkCrossDeviceMetadata(move: anytype) !void {
     var env = try t.environ.createMap(a);
     defer env.deinit();
@@ -38,15 +34,15 @@ pub fn checkCrossDeviceMetadata(move: anytype) !void {
     defer a.free(second_z);
     if ((try Metadata.read(root_z)).device == (try Metadata.read(second_z)).device)
         return error.SkipZigTest;
-    try preservationAt(move, second);
+    try checkPreservation(move, second);
     if (darwin) {
-        try inheritedAclsAt(move, second);
-        try flagsAt(move, second);
-        try aclHardlinksAt(move, second);
+        try checkInheritedAcls(move, second);
+        try checkFlags(move, second);
+        try checkAclHardlinks(move, second);
     }
 }
 
-fn inheritedAclsAt(move: anytype, second: ?[]const u8) !void {
+pub fn checkInheritedAcls(move: anytype, second: ?[]const u8) !void {
     if (!darwin) return error.SkipZigTest;
     const principal = try callerPrincipal();
     defer a.free(principal);
@@ -66,6 +62,10 @@ fn inheritedAclsAt(move: anytype, second: ?[]const u8) !void {
             defer a.free(from);
             const to = try std.fmt.allocPrintSentinel(a, "{s}/item", .{target}, 0);
             defer a.free(to);
+            const from_child = try std.fmt.allocPrintSentinel(a, "{s}/child", .{from}, 0);
+            defer a.free(from_child);
+            const to_child = try std.fmt.allocPrintSentinel(a, "{s}/child", .{to}, 0);
+            defer a.free(to_child);
             defer {
                 _ = native.chmod(from, 0o700);
                 _ = native.chmod(to, 0o700);
@@ -115,16 +115,11 @@ fn inheritedAclsAt(move: anytype, second: ?[]const u8) !void {
                 try t.expect(std.mem.indexOf(u8, before, "inherited") != null);
                 try checkAclAccess(from, deny, directory);
             }
-            var child_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const child_before = if (directory)
-                try aclBytes(try std.fmt.bufPrintSentinel(&child_buffer, "{s}/child", .{from}, 0))
-            else
-                null;
+            const child_before = if (directory) try aclBytes(from_child) else null;
             defer if (child_before) |bytes| a.free(bytes);
             if (directory) {
                 try std.Io.Dir.cwd().createDir(io, to, .default_dir);
-                const child = try std.fmt.bufPrintSentinel(&child_buffer, "{s}/child", .{to}, 0);
-                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = child, .data = "probe" });
+                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = to_child, .data = "probe" });
             } else {
                 try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = to, .data = "probe" });
             }
@@ -133,8 +128,7 @@ fn inheritedAclsAt(move: anytype, second: ?[]const u8) !void {
             const expected = try appendAclText(before, if (source_kind == .no_inherit) "!#acl 1\n" else destination_acl);
             defer a.free(expected);
             const expected_child = if (child_before) |bytes| blk: {
-                const child = try std.fmt.bufPrintSentinel(&child_buffer, "{s}/child", .{to}, 0);
-                const destination_child_acl = try aclBytes(child);
+                const destination_child_acl = try aclBytes(to_child);
                 defer a.free(destination_child_acl);
                 break :blk try appendAclText(bytes, if (source_kind == .no_inherit) "!#acl 1\n" else destination_child_acl);
             } else null;
@@ -150,9 +144,7 @@ fn inheritedAclsAt(move: anytype, second: ?[]const u8) !void {
             try t.expectEqual(mode, (try Metadata.read(to)).mode & 0o7777);
             if (source_kind != .none) try checkAclAccess(to, deny, directory);
             if (expected_child) |bytes| {
-                var buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const child = try std.fmt.bufPrintSentinel(&buffer, "{s}/child", .{to}, 0);
-                const child_after = try aclBytes(child);
+                const child_after = try aclBytes(to_child);
                 defer a.free(child_after);
                 try t.expectEqualSlices(u8, bytes, child_after);
             }
@@ -177,11 +169,7 @@ fn callerPrincipal() ![]u8 {
     });
 }
 
-pub fn checkAclHardlinks(move: anytype) !void {
-    try aclHardlinksAt(move, null);
-}
-
-fn aclHardlinksAt(move: anytype, second: ?[]const u8) !void {
+pub fn checkAclHardlinks(move: anytype, second: ?[]const u8) !void {
     if (!darwin) return error.SkipZigTest;
     var temp = t.tmpDir(.{});
     defer temp.cleanup();
@@ -242,11 +230,7 @@ fn aclHardlinksAt(move: anytype, second: ?[]const u8) !void {
     }
 }
 
-pub fn checkFlags(move: anytype) !void {
-    try flagsAt(move, null);
-}
-
-fn flagsAt(move: anytype, second: ?[]const u8) !void {
+pub fn checkFlags(move: anytype, second: ?[]const u8) !void {
     if (!darwin) return error.SkipZigTest;
     for ([_]u32{ native.UF_IMMUTABLE, native.UF_APPEND }) |flags| {
         var temp = t.tmpDir(.{});
@@ -271,12 +255,7 @@ fn flagsAt(move: anytype, second: ?[]const u8) !void {
         const outside = try std.fmt.allocPrintSentinel(a, "{s}/outside", .{root}, 0);
         defer a.free(outside);
         defer {
-            _ = native.lchflags(from, 0);
-            _ = native.lchflags(file, 0);
-            _ = native.lchflags(moved, 0);
-            _ = native.lchflags(locked, 0);
-            _ = native.lchflags(moved_locked, 0);
-            _ = native.lchflags(outside, 0);
+            for ([_][:0]const u8{ from, file, moved, locked, moved_locked, outside }) |path| _ = native.lchflags(path, 0);
             var dir = std.Io.Dir.cwd().openDir(io, target, .{ .iterate = true }) catch unreachable;
             defer dir.close(io);
             var iterator = dir.iterate();
@@ -447,18 +426,10 @@ pub fn checkPublishFailure(move: anytype) !void {
     const outside_contents = try temp.dir.readFileAlloc(io, "outside/file", a, .limited(64));
     defer a.free(outside_contents);
     try t.expectEqualStrings("outside contents", outside_contents);
-    var dir = try temp.dir.openDir(io, ".", .{ .iterate = true });
-    defer dir.close(io);
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry|
-        try t.expect(!std.mem.startsWith(u8, entry.name, ".tms-move-"));
+    try expectNoStaging(root);
 }
 
-pub fn checkPreservation(move: anytype) !void {
-    try preservationAt(move, null);
-}
-
-fn preservationAt(move: anytype, second: ?[]const u8) !void {
+pub fn checkPreservation(move: anytype, second: ?[]const u8) !void {
     var temp = t.tmpDir(.{});
     defer temp.cleanup();
     const root = try temp.dir.realPathFileAlloc(io, ".", a);
@@ -495,8 +466,8 @@ fn preservationAt(move: anytype, second: ?[]const u8) !void {
     try temp.dir.symLink(io, "file", "source/symlink", .{});
     try setXattr(file, if (darwin) "com.tms.test" else "user.tms.test", "attribute");
     try setXattr(from, if (darwin) "com.tms.directory" else "user.tms.directory", "directory");
-    if (darwin) try setXattr(file, "com.apple.ResourceFork", "resource fork contents");
     if (darwin) {
+        try setXattr(file, "com.apple.ResourceFork", "resource fork contents");
         const value = acl.acl_from_text("!#acl 1\nuser:FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000000:0:root:allow:read\n") orelse
             return error.CreateAclFailed;
         defer _ = acl.acl_free(value);
@@ -610,11 +581,7 @@ pub fn checkFailure(move: anytype) !void {
             try t.expectEqual(error.OutOfMemory, err);
             try t.expectEqual(std.Io.File.Kind.directory, (try temp.dir.statFile(io, "source", .{})).kind);
             try t.expectEqual(std.Io.File.Kind.directory, (try temp.dir.statFile(io, "target", .{})).kind);
-            var directory = try temp.dir.openDir(io, ".", .{ .iterate = true });
-            defer directory.close(io);
-            var iterator = directory.iterate();
-            while (try iterator.next(io)) |entry|
-                try t.expect(!std.mem.startsWith(u8, entry.name, ".tms-move-"));
+            try expectNoStaging(root);
             continue;
         };
         try t.expectError(error.FileNotFound, temp.dir.statFile(io, "source", .{}));
@@ -672,7 +639,7 @@ const PrivacyAllocator = struct {
             const path = try std.fmt.bufPrintSentinel(&buffer, "{s}/{s}", .{ self.root, entry.name }, 0);
             try t.expectEqual(@as(c.mode_t, 0o700), (try Metadata.read(path)).mode & 0o7777);
             if (darwin) {
-                const value = @import("move.zig").native.acl_get_link_np(path, acl.ACL_TYPE_EXTENDED);
+                const value = native.acl_get_link_np(path, acl.ACL_TYPE_EXTENDED);
                 if (value) |permissions| {
                     defer _ = acl.acl_free(permissions);
                     var len: isize = 0;

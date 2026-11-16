@@ -82,19 +82,12 @@ class Workspace:
             [self.tmux, "-f", str(self.root / "tmux.conf"), "-L", self.socket, *argv]
         )
 
-    def close(self):
-        self.tmux_run("kill-server")
-
-    def setup(self, operations):
-        for kind, *args in operations:
-            if kind == "git":
-                result = self.run(["git", *args])
-            elif kind == "tmux":
-                result = self.tmux_run(*args)
-            else:
-                raise ValueError(f"Unknown setup operation {kind!r}")
-            if result.returncode:
-                raise RuntimeError(result.stderr)
+    def setup(self, command, *args):
+        result = (
+            self.tmux_run(*args) if command == "tmux" else self.run([command, *args])
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr)
 
     def sessions(self):
         return self.tmux_run(
