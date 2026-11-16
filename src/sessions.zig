@@ -216,8 +216,7 @@ pub fn path(io: Io, a: A, entry: Session) anyerror![]const u8 {
 pub fn open(io: Io, a: A, entry: Session, client: *const tmux.Client, cfg: *const config.Config) anyerror!void {
     const cwd = try path(io, a, entry);
     const name = try std.mem.replaceOwned(u8, a, entry.name, ".", "_");
-    const snapshot = try client.snapshot(io, a);
-    for (snapshot.sessions) |s| {
+    for (try client.listSessions(io, a)) |s| {
         if (std.mem.eql(u8, s.name, name)) break;
     } else {
         _ = try client.newSession(io, a, name, cwd);

@@ -56,15 +56,15 @@ test "opening bookmark normalizes periods, keeps hyphens, sends nonexecutable sc
     const cfg: config.Config = .{};
     fake.reset(a, &.{});
     try sessions.open(std.testing.io, a, entry, &client, &cfg);
-    try std.testing.expectEqual(@as(usize, 6), fake.calls.items.len);
-    try expectArgs(3, &.{ "new-session", "-d", "-s", "project_one-two", "-c", path });
-    try expectArgs(4, &.{ "send-keys", "-t", "project_one-two:{start}.{top}", try std.fs.path.join(a, &.{ path, ".tms-create" }), "Enter" });
-    try expectArgs(5, &.{ "switch-client", "-t", "project_one-two" });
+    try std.testing.expectEqual(@as(usize, 4), fake.calls.items.len);
+    try expectArgs(1, &.{ "new-session", "-d", "-s", "project_one-two", "-c", path });
+    try expectArgs(2, &.{ "send-keys", "-t", "project_one-two:{start}.{top}", try std.fs.path.join(a, &.{ path, ".tms-create" }), "Enter" });
+    try expectArgs(3, &.{ "switch-client", "-t", "project_one-two" });
 
     fake.reset(a, &.{.{ .stdout = "'project_one-two,0,9'\n" }});
     try sessions.open(std.testing.io, a, entry, &client, &cfg);
-    try std.testing.expectEqual(@as(usize, 4), fake.calls.items.len);
-    try expectArgs(3, &.{ "switch-client", "-t", "project_one-two" });
+    try std.testing.expectEqual(@as(usize, 2), fake.calls.items.len);
+    try expectArgs(1, &.{ "switch-client", "-t", "project_one-two" });
 }
 
 test "configured creation script is keyed by normalized session name" {
@@ -82,7 +82,7 @@ test "configured creation script is keyed by normalized session name" {
     const entry: sessions.Session = .{ .key = "project.one", .name = "project.one", .source = .{ .bookmark = path } };
     fake.reset(a, &.{});
     try sessions.open(std.testing.io, a, entry, &client, &cfg);
-    try expectArgs(4, &.{ "send-keys", "-t", "project_one:{start}.{top}", script, "Enter" });
+    try expectArgs(2, &.{ "send-keys", "-t", "project_one:{start}.{top}", script, "Enter" });
 }
 
 test "opening an existing comma session does not recreate it or rerun its script" {
@@ -97,6 +97,6 @@ test "opening an existing comma session does not recreate it or rerun its script
     const cfg: config.Config = .{};
     fake.reset(a, &.{.{ .stdout = "'a,b,0,'\n" }});
     try sessions.open(std.testing.io, a, entry, &client, &cfg);
-    try std.testing.expectEqual(@as(usize, 4), fake.calls.items.len);
-    try expectArgs(3, &.{ "switch-client", "-t", "a,b" });
+    try std.testing.expectEqual(@as(usize, 2), fake.calls.items.len);
+    try expectArgs(1, &.{ "switch-client", "-t", "a,b" });
 }

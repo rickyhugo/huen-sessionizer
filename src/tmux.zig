@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const process = @import("process");
 const A = std.mem.Allocator;
 const Io = std.Io;
@@ -27,12 +28,40 @@ fn snapshotText(a: A, text: []const u8, literal: bool) ![]const u8 {
         trimmed;
 }
 
+/// Returns the binary of the server that `$TMUX` names when it serves `socket`. Running that binary
+/// skips PATH wrappers such as version-manager shims, which cost hundreds of milliseconds per call,
+/// and always matches the server's protocol version.
+pub fn serverExecutable(io: Io, a: A, tmux_env: ?[]const u8, socket: []const u8) ?[]const u8 {
+    var fields = std.mem.splitScalar(u8, tmux_env orelse return null, ',');
+    if (!std.mem.eql(u8, std.fs.path.basename(fields.first()), socket)) return null;
+    const pid = std.fmt.parseInt(std.c.pid_t, fields.next() orelse return null, 10) catch return null;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = switch (builtin.os.tag) {
+        .macos => blk: {
+            const n = proc_pidpath(pid, &buffer, buffer.len);
+            break :blk if (n > 0) buffer[0..@intCast(n)] else return null;
+        },
+        .linux => blk: {
+            var link: [32]u8 = undefined;
+            const proc = std.fmt.bufPrint(&link, "/proc/{d}/exe", .{pid}) catch return null;
+            break :blk buffer[0 .. Io.Dir.cwd().readLink(io, proc, &buffer) catch return null];
+        },
+        else => return null,
+    };
+    // An upgraded server keeps running from a binary that no longer exists on disk.
+    Io.Dir.cwd().access(io, path, .{ .execute = true }) catch return null;
+    return a.dupe(u8, path) catch null;
+}
+
+extern "c" fn proc_pidpath(pid: std.c.pid_t, buffer: [*]u8, size: u32) c_int;
+
 pub const Client = struct {
     socket: []const u8,
     inside_tmux: bool,
+    executable: []const u8 = "tmux",
 
     fn argv(self: *const Client, a: A, args: []const []const u8) ![]const []const u8 {
-        return std.mem.concat(a, []const u8, &.{ &.{ "tmux", "-L", self.socket }, args });
+        return std.mem.concat(a, []const u8, &.{ &.{ self.executable, "-L", self.socket }, args });
     }
 
     fn execute(self: *const Client, io: Io, a: A, args: []const []const u8) !Output {
@@ -48,7 +77,12 @@ pub const Client = struct {
         return self.readSnapshot(io, a, true);
     }
 
-    fn readSnapshot(self: *const Client, io: Io, a: A, literal: bool) anyerror!Snapshot {
+    /// The sessions part of `snapshot`, for callers that never read the current session.
+    pub fn listSessions(self: *const Client, io: Io, a: A) anyerror![]const SessionInfo {
+        return self.readSessions(io, a, false);
+    }
+
+    fn readSessions(self: *const Client, io: Io, a: A, literal: bool) anyerror![]const SessionInfo {
         const output = try self.execute(io, a, &.{ "list-sessions", "-F", "'#{session_name},#{session_attached},#{session_last_attached}'" });
         var list: std.ArrayList(SessionInfo) = .empty;
         var lines = std.mem.tokenizeScalar(u8, output.stdout, '\n');
@@ -59,9 +93,14 @@ pub const Client = struct {
             const name = fields.rest();
             try list.append(a, .{ .name = name, .attached = !std.mem.eql(u8, attached, "0"), .last_attached = timestamp });
         }
+        return list.toOwnedSlice(a);
+    }
+
+    fn readSnapshot(self: *const Client, io: Io, a: A, literal: bool) anyerror!Snapshot {
+        const list = try self.readSessions(io, a, literal);
         const name = try snapshotText(a, (try self.execute(io, a, &.{ "display-message", "-p", "'#S'" })).stdout, literal);
         const cwd = try snapshotText(a, (try self.execute(io, a, &.{ "display-message", "-p", "'#{session_path}'" })).stdout, literal);
-        return .{ .sessions = try list.toOwnedSlice(a), .current = if (name.len == 0) null else .{ .name = name, .path = cwd } };
+        return .{ .sessions = list, .current = if (name.len == 0) null else .{ .name = name, .path = cwd } };
     }
 
     pub fn windows(self: *const Client, io: Io, a: A, session: ?[]const u8) anyerror![]const Window {
@@ -172,4 +211,17 @@ test "socket selector always precedes command" {
     const args = try client.argv(a, &.{ "new-session", "-d" });
     defer a.free(args);
     try std.testing.expectEqualSlices([]const u8, &.{ "tmux", "-L", "tms-test-only", "new-session", "-d" }, args);
+}
+
+test "server executable comes from the TMUX pid only for the same socket" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const own = try std.fmt.allocPrint(a, "/tmp/tmux-1/fixture,{d},0", .{std.c.getpid()});
+    const path = serverExecutable(io, a, own, "fixture") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.fs.path.isAbsolute(path));
+    try std.testing.expectEqual(null, serverExecutable(io, a, own, "default"));
+    try std.testing.expectEqual(null, serverExecutable(io, a, "/tmp/tmux-1/fixture,not-a-pid,0", "fixture"));
+    try std.testing.expectEqual(null, serverExecutable(io, a, null, "fixture"));
 }
