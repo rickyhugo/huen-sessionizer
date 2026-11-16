@@ -11,13 +11,16 @@ pub fn build(b: *std.Build) void {
         .flags = &.{"-std=c17"},
     });
     const process = module(b, "process", target, optimize);
+    const parallel = module(b, "parallel", target, optimize);
     const repos = module(b, "repos", target, optimize);
     repos.addImport("config", config);
+    repos.addImport("parallel", parallel);
     repos.addImport("process", process);
     const tmux = module(b, "tmux", target, optimize);
     tmux.addImport("process", process);
     const sessions = module(b, "sessions", target, optimize);
     sessions.addImport("config", config);
+    sessions.addImport("parallel", parallel);
     sessions.addImport("repos", repos);
     sessions.addImport("tmux", tmux);
     const matcher = module(b, "matcher", target, optimize);
@@ -35,6 +38,7 @@ pub fn build(b: *std.Build) void {
     const domains = [_]std.Build.Module.Import{
         .{ .name = "config", .module = config },
         .{ .name = "process", .module = process },
+        .{ .name = "parallel", .module = parallel },
         .{ .name = "repos", .module = repos },
         .{ .name = "tmux", .module = tmux },
         .{ .name = "sessions", .module = sessions },
