@@ -131,6 +131,8 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
     var ranked = try matcher.rank(scratch, "", labels);
     defer scratch.free(ranked);
     _ = try reduce(scratch, &state, .{ .matches = ranked }, options);
+    var previews: Previews = .{ .arena = .init(scratch) };
+    defer previews.deinit(io);
     var decoder: input.Decoder = .{};
     var frame = std.heap.ArenaAllocator.init(scratch);
     defer frame.deinit();
@@ -140,18 +142,11 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
             _ = try reduce(scratch, &state, .{ .resize = tty.size() }, options);
             dirty = true;
         }
+        if (try previews.collect(io)) dirty = true;
         if (dirty) {
             _ = frame.reset(.retain_capacity);
-            const a = frame.allocator();
-            const text = if (state.selection) |i| switch (items[state.ranked[i]].preview) {
-                .none => "",
-                .pane => |pane| pane.client.capture(io, a, pane.target) catch "",
-                .directory => |path| preview.directory(io, a, path) catch "",
-            } else "";
-            if (try tty.checkSignals()) {
-                _ = try reduce(scratch, &state, .{ .resize = tty.size() }, options);
-            }
-            const bytes = try render.draw(a, state, items, options, text);
+            const text = if (state.selection) |i| try previews.text(io, items, state.ranked[i]) else "";
+            const bytes = try render.draw(frame.allocator(), state, items, options, text);
             tty.write(bytes) catch |err| {
                 _ = try tty.checkSignals();
                 if (err == error.TerminalInterrupted) continue;
@@ -159,7 +154,7 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
             };
             dirty = false;
         }
-        const ready = try tty.wait(if (decoder.pending()) 35 else 100);
+        const ready = try tty.wait(if (decoder.pending()) 35 else if (previews.pending != null) 5 else 100);
         if (try tty.checkSignals()) {
             _ = try reduce(scratch, &state, .{ .resize = tty.size() }, options);
             dirty = true;
@@ -173,23 +168,74 @@ pub fn choose(io: Io, result: A, scratch: A, items: []const Item, options: confi
             if (n == 0) return null;
             decoder.feed(bytes[0..n]);
         }
+        var rematch = false;
         while (decoder.next(!ready)) |key| {
             switch (try reduce(scratch, &state, .{ .key = key }, options)) {
                 .cancel => return null,
                 .confirm => return items[state.ranked[state.selection.?]].id,
                 .redraw => dirty = true,
-                .rematch => {
-                    const next = try matcher.rank(scratch, state.query.items, labels);
-                    scratch.free(ranked);
-                    ranked = next;
-                    _ = try reduce(scratch, &state, .{ .matches = ranked }, options);
-                    dirty = true;
-                },
+                .rematch => rematch = true,
                 .unchanged => {},
             }
         }
+        // A paste or key burst ranks once, not once per key.
+        if (rematch) {
+            const next = try matcher.rank(scratch, state.query.items, labels);
+            scratch.free(ranked);
+            ranked = next;
+            _ = try reduce(scratch, &state, .{ .matches = ranked }, options);
+            dirty = true;
+        }
     }
 }
+
+/// Fetches one preview at a time in the background so navigation never waits on tmux or the filesystem.
+const Previews = struct {
+    arena: std.heap.ArenaAllocator,
+    cache: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
+    pending: ?struct { item: usize, future: Io.Future([]const u8) } = null,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn deinit(self: *Previews, io: Io) void {
+        if (self.pending) |*job| _ = job.future.cancel(io);
+        self.arena.deinit();
+    }
+
+    /// Returns the cached preview, or "" while it loads.
+    fn text(self: *Previews, io: Io, items: []const Item, item: usize) ![]const u8 {
+        if (items[item].preview == .none) return "";
+        if (self.cache.get(item)) |cached| return cached;
+        if (self.pending != null) return "";
+        self.done.store(false, .monotonic);
+        const future = io.concurrent(fetch, .{ io, self.arena.allocator(), items[item].preview, &self.done }) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => {
+                const fetched = fetch(io, self.arena.allocator(), items[item].preview, &self.done);
+                try self.cache.put(self.arena.allocator(), item, fetched);
+                return fetched;
+            },
+        };
+        self.pending = .{ .item = item, .future = future };
+        return "";
+    }
+
+    /// Stores a finished preview; true means the screen should redraw.
+    fn collect(self: *Previews, io: Io) !bool {
+        const job = &(self.pending orelse return false);
+        if (!self.done.load(.acquire)) return false;
+        try self.cache.put(self.arena.allocator(), job.item, job.future.await(io));
+        self.pending = null;
+        return true;
+    }
+
+    fn fetch(io: Io, a: A, source: Preview, done: *std.atomic.Value(bool)) []const u8 {
+        defer done.store(true, .release);
+        return switch (source) {
+            .none => "",
+            .pane => |pane| pane.client.capture(io, a, pane.target) catch "",
+            .directory => |path| preview.directory(io, a, path) catch "",
+        };
+    }
+};
 
 pub fn bytePosition(text: []const u8, scalar: usize) usize {
     var pos: usize = 0;
