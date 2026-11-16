@@ -288,6 +288,7 @@ pub fn cloneRepo(io: Io, a: A, remote: []const u8, target: []const u8) anyerror!
 }
 
 pub const initRepo = @import("repos/init.zig").create;
+pub const parseRemote = parsers.remote;
 
 fn appendSubmodules(io: Io, a: A, repo: Resolved, prefix: []const u8, recursive: bool, result: *std.ArrayList(Submodule)) anyerror!void {
     const file = try std.fs.path.join(a, &.{ repo.cwd, ".gitmodules" });

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Id = enum { root, config, config_list, start, switch_session, windows, kill, sessions, rename, refresh, clone_repo, init_repo, bookmark, open_session, marks, marks_list, marks_set, marks_open, marks_delete, help, config_help, marks_help };
+pub const Id = enum { root, config, config_list, start, switch_session, windows, kill, sessions, rename, refresh, clone_repo, add, init_repo, bookmark, open_session, marks, marks_list, marks_set, marks_open, marks_delete, help, config_help, marks_help };
 pub const OptionId = enum {
     paths,
     session,
@@ -90,6 +90,7 @@ pub const specs = [_]Spec{
         .{ .id = .path, .long = "path", .value = "PATH", .about = "Directory to create new repository in, if left empty will pick default search path or prompt if multiple are configured" },
         .{ .id = .name, .long = "name", .value = "NAME", .about = "Name of cloned repository directory, will be picked based on remote url if left empty" },
     } },
+    .{ .id = .add, .parent = .root, .name = "add", .about = "Clone repository to ~/<host>/<path> unless it is there and open its session", .suffix = " <REPOSITORY>", .positional = "REPOSITORY", .positional_about = "Git repository URL, such as https://github.com/owner/repo or git@github.com:owner/repo", .required = true },
     .{ .id = .init_repo, .parent = .root, .name = "init-repo", .about = "Initialize empty repository", .suffix = " <REPOSITORY>", .positional = "REPOSITORY", .positional_about = "Name of the repository to initialize", .required = true },
     .{ .id = .bookmark, .parent = .root, .name = "bookmark", .about = "Bookmark a directory so it is available to select along with the Git repositories", .suffix = " [OPTIONS] [PATH]", .positional = "PATH", .positional_about = "Path to bookmark, if left empty bookmark the current directory", .positional_last = true, .options = &.{.{ .id = .delete, .long = "delete", .short = 'd', .kind = .flag, .about = "Delete instead of add a bookmark" }} },
     .{ .id = .open_session, .parent = .root, .name = "open-session", .about = "Open a session", .suffix = " <SESSION>", .positional = "SESSION", .positional_about = "Name of the session to open", .required = true },

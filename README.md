@@ -66,6 +66,7 @@ bind C-w display-popup -E "tms windows"
 | `tms rename NAME` | Rename the active session and its directory |
 | `tms refresh` | Create missing worktree windows |
 | `tms clone-repo` | Clone a repository and open its session |
+| `tms add URL` | Clone a repository to `~/<host>/<path>` and open its session |
 | `tms init-repo` | Create a repository |
 | `tms bookmark` | Add a directory to the project picker |
 | `tms open-session` | Open a session directly |

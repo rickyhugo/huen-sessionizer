@@ -196,9 +196,9 @@ test "static completion order, values, prefixes, and multi-value arguments" {
     const a = arena.allocator();
     const env: Env = .init(a);
     const root = try candidates(std.testing.io, a, &.{ "tms", "" }, 1, &env);
-    try std.testing.expectEqual(@as(usize, 16), root.len);
+    try std.testing.expectEqual(@as(usize, 17), root.len);
     try std.testing.expectEqualStrings("config", root[0].value);
-    try std.testing.expectEqualStrings("--version", root[15].value);
+    try std.testing.expectEqualStrings("--version", root[16].value);
     const bools = try candidates(std.testing.io, a, &.{ "tms", "config", "--full-path", "" }, 3, &env);
     try std.testing.expectEqual(@as(usize, 2), bools.len);
     try std.testing.expectEqualStrings("true", bools[0].value);

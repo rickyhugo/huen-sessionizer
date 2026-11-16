@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
         else if (app.failure) |failure|
             switch (failure) {
                 .session_not_found => |name| .{ .text = try std.fmt.allocPrint(allocator, "Error: Session {s} not found\n", .{name}) },
+                .unsupported_remote => |text| .{ .text = try std.fmt.allocPrint(allocator, "Error: Cannot derive a host and path from '{s}'\n", .{text}) },
                 .mark_not_found => |index| .{ .text = try std.fmt.allocPrint(allocator, "Error: Config Error\n╰╴Session with index {d} not found in marks\n", .{index}) },
                 .no_search_path => .{ .text = "Error: Config Error\n╰╴No search path configured\n" },
                 .invalid_repository_name => .{ .exit_code = 101, .text = "\npanic:\nRepository path contains '/'\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" },
