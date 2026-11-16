@@ -116,7 +116,8 @@ const Fixture = struct {
         return std.fs.path.join(self.a(), &.{ self.root, subpath });
     }
 
-    fn run(self: *Fixture, cwd: []const u8, argv: []const []const u8) !void {
+    fn run(self: *Fixture, cwd: []const u8, prefix: []const []const u8, args: []const []const u8) !void {
+        const argv = try std.mem.concat(self.a(), []const u8, &.{ prefix, args });
         var env = try std.testing.environ.createMap(self.a());
         // The commit hook's index belongs to the checkout, not these fixtures.
         _ = env.swapRemove("GIT_INDEX_FILE");
@@ -128,23 +129,17 @@ const Fixture = struct {
     }
 
     fn git(self: *Fixture, cwd: []const u8, args: []const []const u8) !void {
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(self.a(), &.{
+        try self.run(cwd, &.{
             "git",                     "-c",                         "user.name=tms-test", "-c",                       "user.email=tms-test@example.com",
             "-c",                      "protocol.file.allow=always", "-c",                 "core.hooksPath=/dev/null", "-c",
             "init.defaultBranch=main",
-        });
-        try argv.appendSlice(self.a(), args);
-        try self.run(cwd, argv.items);
+        }, args);
     }
 
     fn jj(self: *Fixture, cwd: []const u8, args: []const []const u8) !void {
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(self.a(), &.{
+        try self.run(cwd, &.{
             "jj", "--no-pager", "--config", "user.name='tms-test'", "--config", "user.email='tms-test@example.com'",
-        });
-        try argv.appendSlice(self.a(), args);
-        try self.run(cwd, argv.items);
+        }, args);
     }
 
     fn repo(self: *Fixture, subpath: []const u8) !repos.RepoRef {
