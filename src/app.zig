@@ -259,7 +259,8 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
                 },
                 else => return err,
             };
-            const target = try std.fs.path.join(a, &.{ try config.expandPath(io, a, env, "~"), location.host, location.path });
+            const host_dir = try std.fs.path.join(a, &.{ try config.expandPath(io, a, env, "~"), location.host });
+            const target = try std.fs.path.join(a, &.{ host_dir, location.path });
             if (try repos.detect(io, target, &.{.git}) == null) {
                 try repos.cloneRepo(io, a, location.url, target);
                 if (try repos.detect(io, target, &.{.git}) == null) {
@@ -267,6 +268,10 @@ pub fn run(io: Io, a: A, scratch: A, argv: []const []const u8, env: *const Env) 
                     Io.Dir.cwd().deleteDir(io, target) catch {};
                     return error.GitError;
                 }
+            }
+            if (!try config.searchReaches(io, a, env, &cfg, target)) {
+                const depth = std.mem.count(u8, location.path, "/") + 1;
+                try config.commit(io, a, env, &cfg, .{ .add_search_dir = .{ .path = host_dir, .depth = depth } });
             }
             const name = std.fs.path.basename(target);
             try sessions.open(io, a, .{ .key = name, .name = name, .source = .{ .repository = .{ .path = target, .provider = .git } } }, client, &cfg);

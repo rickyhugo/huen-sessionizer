@@ -144,6 +144,8 @@ pub const Edit = union(enum) {
     settings: SettingsEdit,
     add_bookmark: []const u8,
     delete_bookmark: []const u8,
+    /// Raises the depth of an entry for the same directory instead of adding a second one.
+    add_search_dir: SearchDirectory,
     set_mark: struct { index: ?usize, path: []const u8 },
     delete_mark: usize,
     clear_marks,
@@ -235,6 +237,16 @@ pub fn commit(io: Io, a: A, env: *const Env, cfg: *Config, edit: Edit) anyerror!
                 if (std.mem.eql(u8, item, path)) break;
             } else cfg.bookmarks = try std.mem.concat(a, []const u8, &.{ items, &.{path} });
         },
+        .add_search_dir => |dir| {
+            const path = try canonical(io, a, env, dir.path);
+            const dirs = try a.dupe(SearchDirectory, cfg.search_dirs orelse &.{});
+            for (dirs) |*existing| {
+                if (!std.mem.eql(u8, path, canonical(io, a, env, existing.path) catch continue)) continue;
+                existing.depth = @max(existing.depth, dir.depth);
+                cfg.search_dirs = dirs;
+                break;
+            } else cfg.search_dirs = try std.mem.concat(a, SearchDirectory, &.{ dirs, &.{.{ .path = path, .depth = dir.depth }} });
+        },
         .delete_bookmark => |path| if (cfg.bookmarks) |items| for (items, 0..) |item, i| {
             if (!std.mem.eql(u8, item, path)) continue;
             cfg.bookmarks = try std.mem.concat(a, []const u8, &.{ items[0..i], items[i + 1 ..] });
@@ -318,6 +330,23 @@ pub fn searchRoots(io: Io, a: A, env: *const Env, cfg: *const Config) anyerror![
     }
     if (roots.items.len == 0) return error.NoValidSearchPath;
     return roots.toOwnedSlice(a);
+}
+
+/// Whether discovery walks from a search root down to `path`; exclusions are not considered.
+pub fn searchReaches(io: Io, a: A, env: *const Env, cfg: *const Config, path: []const u8) anyerror!bool {
+    const roots = searchRoots(io, a, env, cfg) catch |err| switch (err) {
+        error.NoDefaultSearchPath, error.NoValidSearchPath => return false,
+        else => return err,
+    };
+    const target = try canonical(io, a, env, path);
+    for (roots) |root| {
+        if (!std.mem.startsWith(u8, target, root.path)) continue;
+        const rest = target[root.path.len..];
+        if (rest.len == 0) return true;
+        if (rest[0] != '/' and !std.mem.endsWith(u8, root.path, "/")) continue;
+        if (std.mem.count(u8, std.mem.trim(u8, rest, "/"), "/") + 1 <= root.depth) return true;
+    }
+    return false;
 }
 
 pub fn bookmarkPaths(io: Io, a: A, env: *const Env, cfg: *const Config) anyerror![]const []const u8 {
@@ -822,6 +851,39 @@ test "raw saves, canonical roots, bookmarks, and valid mark allocation" {
     isolated.search_dirs = &.{.{ .path = "/no/such/directory", .depth = 1 }};
     try std.testing.expectError(error.NoValidSearchPath, searchRoots(io, a, &env, &isolated));
     try std.testing.expectError(error.RemoveWithoutExclusions, commit(io, a, &env, &isolated, .{ .settings = .{ .remove = &.{"missing"} } }));
+}
+
+test "search reach follows root depth and added directories merge by path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "code/github.com/owner/repo");
+    try tmp.dir.createDirPath(io, "code/gitlab.com/group/sub/repo");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env: Env = .init(a);
+    try env.put("HOME", root);
+    try env.put("TMS_CONFIG_FILE", try std.fs.path.join(a, &.{ root, "config.toml" }));
+    var cfg = try load(io, a, &env);
+    const repo = try std.fs.path.join(a, &.{ root, "code/github.com/owner/repo" });
+    const nested = try std.fs.path.join(a, &.{ root, "code/gitlab.com/group/sub/repo" });
+    try std.testing.expect(!try searchReaches(io, a, &env, &cfg, repo));
+    cfg.search_dirs = &.{.{ .path = "~/code", .depth = 2 }};
+    try std.testing.expect(!try searchReaches(io, a, &env, &cfg, repo));
+    cfg.search_dirs = &.{.{ .path = "~/code", .depth = 3 }};
+    try std.testing.expect(try searchReaches(io, a, &env, &cfg, repo));
+    try std.testing.expect(!try searchReaches(io, a, &env, &cfg, nested));
+    try commit(io, a, &env, &cfg, .{ .add_search_dir = .{ .path = "~/code/gitlab.com", .depth = 3 } });
+    try commit(io, a, &env, &cfg, .{ .add_search_dir = .{ .path = "~/code/gitlab.com/", .depth = 2 } });
+    try std.testing.expect(try searchReaches(io, a, &env, &cfg, nested));
+    try commit(io, a, &env, &cfg, .{ .add_search_dir = .{ .path = "~/code", .depth = 4 } });
+    const saved = try load(io, a, &env);
+    try std.testing.expectEqual(@as(usize, 2), saved.search_dirs.?.len);
+    try std.testing.expectEqual(@as(usize, 4), saved.search_dirs.?[0].depth);
+    try std.testing.expectEqualStrings(try std.fs.path.join(a, &.{ root, "code/gitlab.com" }), saved.search_dirs.?[1].path);
+    try std.testing.expectEqual(@as(usize, 3), saved.search_dirs.?[1].depth);
 }
 
 test "out-of-range TOML depths fail before replacing a saved configuration" {
