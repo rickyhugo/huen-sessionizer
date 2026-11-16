@@ -65,7 +65,7 @@ pub fn reduce(a: A, state: *State, event: Event, options: config.PickerOptions) 
                     if (state.ranked.len == 0) return .unchanged;
                     const increment = (mapped == .move_up) == (options.input_position == .bottom);
                     const len = state.ranked.len;
-                    state.selection = if (state.selection) |selected| (if (increment) selected + 1 else selected + len - 1) % len else 0;
+                    state.selection = if (state.selection) |selected| (selected + if (increment) 1 else len - 1) % len else 0;
                     keepVisible(state);
                     return .redraw;
                 },

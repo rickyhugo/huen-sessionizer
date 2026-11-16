@@ -1,6 +1,7 @@
 const std = @import("std");
 const picker = @import("../picker.zig");
 const config = @import("config");
+const render = @import("render.zig");
 const a = std.testing.allocator;
 const bindings = [_]config.Binding{
     .{ .key = .{ .code = .left }, .action = .cursor_left },
@@ -86,7 +87,6 @@ test "all mapped edits consume the key without insertion" {
 }
 
 test "tiny terminal sizes and empty lists are safe" {
-    const render = @import("render.zig");
     for (0..5) |width| for (0..5) |height| {
         var state: picker.State = .{ .size = .{ .width = @intCast(width), .height = @intCast(height) } };
         _ = try picker.reduce(a, &state, .{ .resize = state.size }, options);
@@ -138,7 +138,6 @@ test "every editing action handles a scalar cursor in the middle of a line" {
 }
 
 test "display cursor uses cells while edits retain scalar positions" {
-    const render = @import("render.zig");
     var state: picker.State = .{ .size = .{ .width = 80, .height = 24 } };
     defer state.query.deinit(a);
     try insert(&state, "界e\u{301}");
