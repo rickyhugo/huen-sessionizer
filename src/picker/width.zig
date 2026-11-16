@@ -62,11 +62,6 @@ fn lookup(scalar: u21) Record {
     unreachable;
 }
 
-pub fn single(scalar: u21) usize {
-    if (scalar < 32 or (scalar >= 127 and scalar <= 159)) return 0;
-    return lookup(scalar).width;
-}
-
 pub fn isUpper(scalar: u21) bool {
     return lookup(scalar).properties & 32 != 0;
 }
@@ -103,7 +98,7 @@ pub fn clusterLen(text: []const u8) usize {
         if (text.len - pos < n) break;
         const scalar = std.unicode.utf8Decode(text[pos..][0..n]) catch break;
         const record = lookup(scalar);
-        const next: Category = @fromBackingInt(@intCast(@as(u4, @truncate(record.grapheme))));
+        const next: Category = @fromBackingInt(@as(u4, @truncate(record.grapheme)));
         if (pos != 0) {
             const boundary = if (previous == .cr and next == .lf)
                 false
@@ -147,15 +142,6 @@ pub fn clusterLen(text: []const u8) usize {
 
 fn control(category: Category) bool {
     return category == .control or category == .cr or category == .lf;
-}
-
-pub fn prefix(text: []const u8, scalar_cursor: usize) usize {
-    var pos: usize = 0;
-    var count: usize = 0;
-    while (pos < text.len and count < scalar_cursor) : (count += 1) {
-        pos += std.unicode.utf8ByteSequenceLength(text[pos]) catch 1;
-    }
-    return width(text[0..@min(pos, text.len)]);
 }
 
 pub const Clip = struct { bytes: usize = 0, cells: usize = 0 };
@@ -266,10 +252,7 @@ pub fn width(text: []const u8) usize {
     while (end > 0) {
         var start = end - 1;
         while (start > 0 and text[start] & 0xc0 == 0x80) start -= 1;
-        const scalar = std.unicode.utf8Decode(text[start..end]) catch {
-            end = start;
-            continue;
-        };
+        const scalar = std.unicode.utf8Decode(text[start..end]) catch unreachable;
         end = start;
         if (scalar < 32 or (scalar >= 127 and scalar <= 159)) continue;
         const value = step(scalar, next);
@@ -393,7 +376,7 @@ test "display width is locale independent and handles combining and emoji sequen
     try std.testing.expectEqual(@as(usize, 2), width("❤️"));
     try std.testing.expectEqual(@as(usize, 1), width("❤"));
     try std.testing.expectEqual(@as(usize, 1), width("لا"));
-    try std.testing.expectEqual(@as(usize, 0), single(0x94d));
+    try std.testing.expectEqual(@as(u8, 0), lookup(0x94d).width);
 }
 
 test "clipping keeps complete extended grapheme clusters" {
